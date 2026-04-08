@@ -1,6 +1,7 @@
 📝 Factorio Server Manager 開発ロードマップ
 
 Phase 1: サーバー状態の可視化 (/status)
+
 [x] feature/status-command ブランチの作成
 
 [x] register.py の更新: /status コマンドの定義と登録
@@ -14,6 +15,7 @@ Phase 1: サーバー状態の可視化 (/status)
 [x] Pull Request 作成 & develop へマージ
 
 Phase 2: サーバー停止時のデータ整合性確保
+
 [ ] feature/safe-save-on-stop ブランチの作成
 
 [ ] RCON (Remote Console) の導入: EC2内のFactorioへセーブ命令を送るための設定
@@ -23,6 +25,7 @@ Phase 2: サーバー停止時のデータ整合性確保
 [ ] Pull Request 作成 & develop へマージ
 
 Phase 3: 自動停止・定時停止機能
+
 [ ] feature/auto-stop ブランチの作成
 
 [ ] EC2内監視スクリプトの作成: プレイヤー数を取得するPythonスクリプトの作成
@@ -38,6 +41,7 @@ Phase 3: 自動停止・定時停止機能
 [ ] Pull Request 作成 & develop へマージ
 
 Phase 4: セーブデータ管理と自動バックアップ (S3連携)
+
 [ ] feature/save-data-management ブランチの作成
 
 [ ] S3バケットの作成とIAMポリシー更新: Lambda/EC2のS3アクセス権限追加
@@ -57,6 +61,7 @@ S3へ自動アップロードするスクリプトをEC2内に実装
 [ ] Pull Request 作成 & develop へマージ
 
 Phase 5: AIプレイヤー連携
+
 [ ] feature/ai-player-integration ブランチの作成
 
 [ ] AI用サーバー（別環境）との連携APIの実装
