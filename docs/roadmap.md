@@ -1,4 +1,5 @@
 📝 Factorio Server Manager 開発ロードマップ
+
 Phase 1: サーバー状態の可視化 (/status)
 [x] feature/status-command ブランチの作成
 
