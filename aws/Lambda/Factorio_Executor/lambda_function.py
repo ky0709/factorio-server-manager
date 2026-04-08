@@ -2,12 +2,55 @@ import boto3
 import json
 import os
 import time
+import socket
+import struct
 import urllib.request
 
 # 環境変数の読み込み
 INSTANCE_ID = os.environ.get('INSTANCE_ID')
 REGION = os.environ.get('REGION')
+RCON_PORT = int(os.environ.get('RCON_PORT', '27015'))
+
 ec2 = boto3.client('ec2', region_name=REGION)
+ssm = boto3.client('ssm', region_name=REGION)
+
+def get_rcon_password():
+    """SSM Parameter StoreからSecureStringのパスワードを取得"""
+    print("Fetching RCON password from SSM...")
+    response = ssm.get_parameter(
+        Name='/factorio/RCON_PASSWORD',
+        WithDecryption=True
+    )
+    return response['Parameter']['Value']
+
+def run_rcon_command(ip, port, password, command):
+    """FactorioサーバーにRCONコマンドを送信する (Source RCON Protocol)"""
+    try:
+        with socket.create_connection((ip, port), timeout=5) as sock:
+            def send_packet(pkt_id, pkt_type, body):
+                # Packet format: Size(4), ID(4), Type(4), Body(str), Term(2)
+                data = struct.pack('<ii', pkt_id, pkt_type) + body.encode('utf-8') + b'\x00\x00'
+                sock.sendall(struct.pack('<i', len(data)) + data)
+
+            def receive_packet():
+                raw_size = sock.recv(4)
+                if not raw_size: return -1, -1, ""
+                size = struct.unpack('<i', raw_size)[0]
+                data = sock.recv(size)
+                pkt_id, pkt_type = struct.unpack('<ii', data[:8])
+                return pkt_id, pkt_type, data[8:-2].decode('utf-8', errors='ignore')
+
+            # 1. 認証 (Type 3: SERVERDATA_AUTH)
+            send_packet(1, 3, password)
+            pkt_id, _, _ = receive_packet()
+            if pkt_id == -1: return "RCON Authentication Failed (Invalid Password)"
+
+            # 2. コマンド実行 (Type 2: SERVERDATA_EXECCOMMAND)
+            send_packet(2, 2, command)
+            _, _, response = receive_packet()
+            return response
+    except Exception as e:
+        return f"RCON Connection Error: {str(e)}"
 
 def lambda_handler(event, context):
     # 1. デバッグログ（親から何が届いたかCloudWatchで100%確認するため）
@@ -43,9 +86,37 @@ def lambda_handler(event, context):
             message = f"✅ Factorioサーバーが起動しました。\n接続先: `{ip}:34197`"
             
         elif command_name == 'stop':
-            print("Stopping EC2...")
+            print("Preparing to stop EC2. Sending save command first...")
+            
+            # 現在の状態を確認し、起動中であればセーブを試行
+            res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
+            instance = res['Reservations'][0]['Instances'][0]
+            state = instance['State']['Name']
+            ip = instance.get('PublicIpAddress')
+
+            if state == 'running' and ip:
+                password = get_rcon_password()
+                print(f"Sending /server-save to {ip}:{RCON_PORT}")
+                rcon_res = run_rcon_command(ip, RCON_PORT, password, "/server-save")
+                print(f"RCON Response: {rcon_res}")
+                time.sleep(2) # セーブ完了のための短い待機
+
             ec2.stop_instances(InstanceIds=[INSTANCE_ID])
-            message = "✅ サーバーを停止しました。"
+
+            # 停止完了を待機
+            print("Waiting for instance to enter 'stopped' state...")
+            waiter = ec2.get_waiter('instance_stopped')
+            try:
+                # 5秒おきに最大24回（計2分間）チェック
+                waiter.wait(
+                    InstanceIds=[INSTANCE_ID],
+                    WaiterConfig={'Delay': 5, 'MaxAttempts': 24}
+                )
+                message = "✅ サーバーの停止が完了しました。"
+                if state == 'running': message = "💾 セーブ完了を確認し、サーバーを正常に停止しました。"
+            except Exception as e:
+                print(f"Waiter error or timeout: {e}")
+                message = "🛑 停止処理を開始しましたが、完了確認がタイムアウトしました。/status コマンドで後ほど確認してください。"
 
         elif command_name == 'status':
             print("Checking EC2 status...")
