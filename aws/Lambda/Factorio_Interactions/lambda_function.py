@@ -32,6 +32,8 @@ def lambda_handler(event, context):
     if data.get('type') == 2:
         command_name = data.get('data', {}).get('name')
         
+        data['action'] = command_name
+
         # 子Lambdaを非同期で呼び出す（全データを引き継ぐ）
         lambda_client.invoke(
             FunctionName=CHILD_LAMBDA_NAME,
@@ -44,6 +46,8 @@ def lambda_handler(event, context):
             content = "🚀 Factorioサーバーを起動しています..."
         elif command_name == 'stop':
             content = "🛑 サーバーを停止しています..."
+        elif command_name == 'status':
+            content = "現在のサーバー状態を確認しています..."
         else:
             content = "リクエストを受理しました。"
 
