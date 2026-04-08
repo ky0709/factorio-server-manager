@@ -13,6 +13,13 @@
             "Effect": "Allow",
             "Action": "ec2:DescribeInstances",
             "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter"
+            ],
+            "Resource": "arn:aws:ssm:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:parameter/factorio/RCON_PASSWORD"
         }
     ]
 }

@@ -16,13 +16,13 @@ Phase 1: サーバー状態の可視化 (/status)
 
 Phase 2: サーバー停止時のデータ整合性確保
 
-[ ] feature/safe-save-on-stop ブランチの作成
+[x] feature/safe-save-on-stop ブランチの作成
 
-[ ] RCON (Remote Console) の導入: EC2内のFactorioへセーブ命令を送るための設定
+[x] RCON (Remote Console) の導入: EC2内のFactorioへセーブ命令を送るための設定
 
-[ ] 停止ロジックの改善: EC2を止める直前に server-save コマンドを発行し、保存完了を確認してからインスタンスを停止する処理の実装
+[x] 停止ロジックの改善: EC2を止める直前に server-save コマンドを発行し、保存完了を確認してからインスタンスを停止する処理の実装
 
-[ ] Pull Request 作成 & develop へマージ
+[x] Pull Request 作成 & develop へマージ
 
 Phase 3: 自動停止・定時停止機能
 
