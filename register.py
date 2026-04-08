@@ -22,6 +22,10 @@ commands = [
     {
         "name": "stop",
         "description": "Factorioサーバーを停止します"
+    },
+    {
+        "name": "status",
+        "description": "サーバーの現在の起動状態を確認します"
     }
 ]
 

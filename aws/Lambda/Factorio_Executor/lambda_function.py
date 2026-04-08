@@ -18,9 +18,8 @@ def lambda_handler(event, context):
     token = event.get('token')
     app_id = event.get('application_id')
     
-    # スラッシュコマンドの名前を取得
-    data_obj = event.get('data', {})
-    command_name = data_obj.get('name')
+    # スラッシュコマンドの名前またはアクションを取得
+    command_name = event.get('action') or event.get('data', {}).get('name')
 
     print(f"Parsed data: command={command_name}, app_id={app_id}, has_token={'Yes' if token else 'No'}")
 
@@ -47,6 +46,21 @@ def lambda_handler(event, context):
             print("Stopping EC2...")
             ec2.stop_instances(InstanceIds=[INSTANCE_ID])
             message = "✅ サーバーを停止しました。"
+
+        elif command_name == 'status':
+            print("Checking EC2 status...")
+            res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
+            state = res['Reservations'][0]['Instances'][0]['State']['Name']
+            
+            # 状態に応じたメッセージのマッピング
+            state_map = {
+                'running': "🟢 実行中 (Running)",
+                'stopped': "⚪ 停止済み (Stopped)",
+                'pending': "🟡 起動準備中... (Pending)",
+                'stopping': "🟡 停止処理中... (Stopping)"
+            }
+            status_text = state_map.get(state, state)
+            message = f"現在のサーバー状態: {status_text}"
 
         else:
             message = f"不明なコマンドです: {command_name}"

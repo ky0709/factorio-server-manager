@@ -2,6 +2,8 @@
 
 Discordのスラッシュコマンドから、AWS上のFactorio専用サーバー（EC2）を起動・停止・状態確認するためのサーバーレスアプリケーションです。
 
+今後の予定については [docs/roadmap.md](docs/roadmap.md) を参照してください。
+
 ## 🛠 特徴
 - **完全サーバーレス**: Discordからのリクエストを AWS Lambda + API Gateway で直接処理するため、管理用の常駐サーバーが不要です。
 - **非同期アーキテクチャ**: Discordの「3秒ルール（応答制限）」を回避するため、受付用（Interactions）と実行用（Executor）の親子Lambda構成を採用しています。
