@@ -26,19 +26,19 @@ Phase 2: サーバー停止時のデータ整合性確保
 
 Phase 3: 自動停止・定時停止機能
 
-[ ] feature/auto-stop ブランチの作成
+[x] feature/auto-stop ブランチの作成
 
-[ ] EC2内監視スクリプトの作成: プレイヤー数を取得するPythonスクリプトの作成
+[x] EC2内監視スクリプトの作成: プレイヤー数を取得するPythonスクリプトの作成
 
-[ ] EventBridge (Scheduler) の設定:
+[x] EventBridge (Scheduler) の設定:
 
-毎日指定時刻に停止Lambdaを叩く設定
+[x] 毎日指定時刻に停止Lambdaを叩く設定
 
-5分おきに監視Lambdaを叩く設定
+[x] 5分おきに監視Lambdaを叩く設定
 
-[ ] Lambdaの更新: プレイヤー0人が一定時間続いた場合の停止ロジック実装
+[x] Lambdaの更新: プレイヤー0人が一定時間続いた場合の停止ロジック実装
 
-[ ] Pull Request 作成 & develop へマージ
+[x] Pull Request 作成 & develop へマージ
 
 Phase 4: セーブデータ管理と自動バックアップ (S3連携)
 
