@@ -1,7 +1,5 @@
 📝 Factorio Server Manager 開発ロードマップ
-
 Phase 1: サーバー状態の可視化 (/status)
-
 [x] feature/status-command ブランチの作成
 
 [x] register.py の更新: /status コマンドの定義と登録
@@ -15,7 +13,6 @@ Phase 1: サーバー状態の可視化 (/status)
 [x] Pull Request 作成 & develop へマージ
 
 Phase 2: サーバー停止時のデータ整合性確保
-
 [x] feature/safe-save-on-stop ブランチの作成
 
 [x] RCON (Remote Console) の導入: EC2内のFactorioへセーブ命令を送るための設定
@@ -25,22 +22,29 @@ Phase 2: サーバー停止時のデータ整合性確保
 [x] Pull Request 作成 & develop へマージ
 
 Phase 3: 自動停止・定時停止機能
-
 [x] feature/auto-stop ブランチの作成
 
 [x] EC2内監視スクリプトの作成: プレイヤー数を取得するPythonスクリプトの作成
 
 [x] EventBridge (Scheduler) の設定:
 
-[x] 毎日指定時刻に停止Lambdaを叩く設定
+[x]毎日指定時刻に停止Lambdaを叩く設定
 
-[x] 5分おきに監視Lambdaを叩く設定
+[x]5分おきに監視Lambdaを叩く設定
 
 [x] Lambdaの更新: プレイヤー0人が一定時間続いた場合の停止ロジック実装
 
 [x] Pull Request 作成 & develop へマージ
 
-Phase 4: セーブデータ管理と自動バックアップ (S3連携)
+Phase 4: セーブデータ管理と自動バックアップ (S3 Files 連携)
+
+**初期ステップ**: 現在のセーブデータフォルダおよびログフォルダを Amazon S3 Files にマウントする。
+
+**Amazon S3 Files 採用**: 2026年4月7日に発表された Amazon S3 Files を採用。従来の EFS や手動同期スクリプトを排除し、S3 のコストメリットとファイルシステムの利便性を両立させた最新のストレージ戦略を実装予定。
+
+⚠️ **実装時の注意点（要確認）**:
+発表されたばかりなので、以下の点を公式ドキュメントで確認する必要があります：
+- 書き込みの遅延（レイテンシ）: Factorioのオートセーブ時にゲームが止まらない程度の速度が出るか。
 
 [ ] feature/save-data-management ブランチの作成
 
@@ -61,7 +65,6 @@ S3へ自動アップロードするスクリプトをEC2内に実装
 [ ] Pull Request 作成 & develop へマージ
 
 Phase 5: AIプレイヤー連携
-
 [ ] feature/ai-player-integration ブランチの作成
 
 [ ] AI用サーバー（別環境）との連携APIの実装
