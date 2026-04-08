@@ -35,7 +35,17 @@ Discordのスラッシュコマンドから、AWS上のFactorio専用サーバ�
 1. `.env.example` を参考に `.env` を作成し、各種トークンとインスタンスIDを設定。
 2. `pip install -r requirements.txt` で依存関係をインストール。
 3. `python register.py` を実行してDiscordにコマンドを登録。
-4. AWS Lambdaにコードをデプロイ（`PyNaCl` はレイヤーとして追加が必要）。
+4. **AWS Lambda レイヤーの準備**
+   
+   署名検証ライブラリ `PyNaCl` は Lambda の標準環境に含まれないため、以下の手順でレイヤーを作成・適用してください。
+   ```bash
+   mkdir python
+   pip install pynacl -t ./python
+   zip -r pynacl_layer.zip python
+   ```
+   作成した pynacl_layer.zip を AWS Lambda のレイヤーとして登録し、Factorio_Interactions 関数にアタッチします。
+5. ソースコードのデプロイ
+aws/Lambda/ 内の各 lambda_function.py をそれぞれの関数にデプロイしてください。
 
 ## ⚖️ License
 MIT License
