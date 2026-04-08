@@ -7,7 +7,7 @@
                 "ec2:StartInstances",
                 "ec2:StopInstances"
             ],
-            "Resource": "arn:aws:ec2:<YOUR_REGION>:*:instance/<YOUR_INSTANCE_ID>"
+            "Resource": "arn:aws:ec2:<REGION>:<ACCOUNT_ID>:instance/<INSTANCE_ID>"
         },
         {
             "Effect": "Allow",
@@ -19,7 +19,18 @@
             "Action": [
                 "ssm:GetParameter"
             ],
-            "Resource": "arn:aws:ssm:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:parameter/factorio/RCON_PASSWORD"
+            "Resource": [
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/RCON_PASSWORD",
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/DISCORD_WEBHOOK_URL"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:UpdateItem"
+            ],
+            "Resource": "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/FactorioState"
         }
     ]
 }
