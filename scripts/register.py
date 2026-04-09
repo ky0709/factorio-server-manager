@@ -4,8 +4,11 @@ import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
 from dotenv import load_dotenv
 
-# .envファイルを読み込む
-load_dotenv()
+# スクリプトの場所を基準にプロジェクトルートを取得
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# .envファイルをルートから読み込む
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # 環境変数から値を取得
 BOT_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -38,6 +41,42 @@ def register_commands():
     {
         "name": "status",
         "description": "サーバーの現在の起動状態を確認します"
+    },
+    {
+        "name": "save",
+        "description": "Factorioサーバーのセーブを実行します"
+    },
+    {
+        "name": "restore",
+        "description": "セーブデータを過去のバージョンから復元します",
+        "options": [
+            {
+                "name": "list",
+                "description": "指定した日付のセーブデータ一覧を表示します（例: 20260409）",
+                "type": 1,
+                "options": [
+                    {
+                        "name": "date",
+                        "description": "検索する日付 (YYYYMMDD)。指定しない場合は本日分を表示",
+                        "type": 3,
+                        "required": False
+                    }
+                ]
+            },
+            {
+                "name": "select",
+                "description": "指定したバージョンIDのセーブデータを復元します",
+                "type": 1,
+                "options": [
+                    {
+                        "name": "version_id",
+                        "description": "復元したいS3のバージョンID",
+                        "type": 3,
+                        "required": True
+                    }
+                ]
+            }
+        ]
     }
 ]
 
@@ -47,7 +86,7 @@ def register_commands():
     }
 
     for cmd in commands:
-        response = requests.post(url, headers=headers, json=cmd)
+        response = requests.post(url, headers=headers, json=cmd, timeout=10)
         if response.status_code in [200, 201]:
             print(f"✅ Command '{cmd['name']}': Success!")
         else:

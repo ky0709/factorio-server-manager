@@ -1,4 +1,5 @@
 import boto3
+from botocore.exceptions import ClientError
 import json
 import os
 import time
@@ -6,17 +7,21 @@ import socket
 import struct
 import urllib.request
 import re
+from datetime import datetime, timedelta, timezone
 
 # 環境変数の読み込み
 INSTANCE_ID = os.environ.get('INSTANCE_ID')
 REGION = os.environ.get('REGION')
 RCON_PORT = int(os.environ.get('RCON_PORT', '27015'))
 DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
+SAVE_FILE_KEY = os.environ.get('SAVE_FILE_KEY', 'save.zip') # メインセーブファイルのS3キー
+S3_BUCKET = os.environ.get('S3_BUCKET_NAME')
 
 ec2 = boto3.client('ec2', region_name=REGION)
 ssm = boto3.client('ssm', region_name=REGION)
 dynamodb = boto3.resource('dynamodb', region_name=REGION)
 factorio_state_table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+s3 = boto3.client('s3', region_name=REGION)
 
 def send_webhook_message(url, content):
     """Discord Webhookにメッセージを送信する"""
@@ -97,35 +102,33 @@ def get_player_count(ip, port, password):
         return -1
 
 
-def execute_ec2_command(command_name):
+def execute_ec2_command(command_name, command_data=None):
     """EC2の起動・停止・状態確認のコアロジック"""
     print(f"Executing EC2 command: {command_name}")
     try:
+        # 1. 最新のインスタンス状態とIPを取得
+        res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
+        instance = res['Reservations'][0]['Instances'][0]
+        state = instance['State']['Name']
+        ip = instance.get('PublicIpAddress')
+
         if command_name == 'start':
-            res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-            state = res['Reservations'][0]['Instances'][0]['State']['Name']
             if state == 'running':
                 return "ALREADY_RUNNING"
 
             print(f"Starting EC2 (Current state: {state})...")
             ec2.start_instances(InstanceIds=[INSTANCE_ID])
             waiter = ec2.get_waiter('instance_running')
-            waiter.wait(InstanceIds=[INSTANCE_ID], WaiterConfig={'Delay': 5, 'MaxAttempts': 6})
+            # 起動には30秒以上かかることが多いため、MaxAttemptsを12（60秒）に拡張
+            waiter.wait(InstanceIds=[INSTANCE_ID], WaiterConfig={'Delay': 5, 'MaxAttempts': 12})
             res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
             ip = res['Reservations'][0]['Instances'][0].get('PublicIpAddress', '取得中...')
             return f"✅ Factorioサーバーが起動しました。\n接続先: `{ip}:34197`"
             
         elif command_name == 'stop':
-            print("Preparing to stop EC2. Sending save command first...")
-            res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-            instance = res['Reservations'][0]['Instances'][0]
-            state = instance['State']['Name']
-
             # すでに停止している場合は特殊なステータスを返す
             if state == 'stopped':
                 return "ALREADY_STOPPED"
-
-            ip = instance.get('PublicIpAddress')
 
             if state == 'running' and ip:
                 password = get_rcon_password()
@@ -134,23 +137,55 @@ def execute_ec2_command(command_name):
                 print(f"RCON Response: {rcon_res}")
                 time.sleep(2)
 
+                # クリーンシャットダウン・シーケンス
+                # 1. サービス停止 (ファイルハンドル解放) -> 2. sync (キャッシュ書き出し) -> 3. umount
+                shutdown_commands = [
+                    "sudo systemctl stop factorio",
+                    "sync",
+                    "sudo umount -l /mnt/factorio-saves"
+                ]
+                
+                print(f"Executing cleanup commands via SSM on {INSTANCE_ID}...")
+                try:
+                    send_res = ssm.send_command(
+                        InstanceIds=[INSTANCE_ID],
+                        DocumentName="AWS-RunShellScript",
+                        Parameters={'commands': shutdown_commands}
+                    )
+                    command_id = send_res['Command']['CommandId']
+                    
+                    # 最大30秒間、クリーンアップの完了を待機
+                    for i in range(6): # 5秒 * 6回 = 30秒
+                        try:
+                            invocations = ssm.list_command_invocations(CommandId=command_id, InstanceId=INSTANCE_ID)['CommandInvocations']
+                            if invocations:
+                                status = invocations[0]['Status']
+                                if status in ['Success', 'Failed', 'Cancelled', 'TimedOut']: # TimedOutも考慮
+                                    print(f"Cleanup commands finished with status: {status}")
+                                    break
+                                else:
+                                    print(f"SSM command status: {status}. Waiting...")
+                            else:
+                                print(f"SSM command invocation {command_id} not yet available. Waiting...")
+                        except ClientError as ce:
+                            print(f"Error checking SSM command status (ClientError): {ce}. Proceeding with instance stop.")
+                            break # クライアントエラーが発生した場合は待機を中断
+                        except Exception as e:
+                            print(f"Unexpected error checking SSM command status: {e}. Proceeding with instance stop.")
+                            break # 予期せぬエラーが発生した場合は待機を中断
+                        time.sleep(5)
+                except Exception as e:
+                    print(f"Lazy unmount failed: {e}. Proceeding with instance stop.")
+
             ec2.stop_instances(InstanceIds=[INSTANCE_ID])
             print("Waiting for instance to enter 'stopped' state...")
             waiter = ec2.get_waiter('instance_stopped')
-            try:
-                waiter.wait(InstanceIds=[INSTANCE_ID], WaiterConfig={'Delay': 5, 'MaxAttempts': 24})
-                message = "✅ サーバーの停止が完了しました。"
-                if state == 'running': message = "💾 セーブ完了を確認し、サーバーを正常に停止しました。"
-                return message
-            except Exception as e:
-                print(f"Waiter error or timeout: {e}")
-                return "🛑 停止処理を開始しましたが、完了確認がタイムアウトしました。/status コマンドで後ほど確認してください。"
+            waiter.wait(InstanceIds=[INSTANCE_ID], WaiterConfig={'Delay': 5, 'MaxAttempts': 24})
+            return "✅ セーブ完了を確認し、サーバーを停止しました。"
 
         elif command_name == 'status':
             print("Checking EC2 status...")
-            res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-            state = res['Reservations'][0]['Instances'][0]['State']['Name']
-            state_map = {
+            state_map = { # state変数はexecute_ec2_commandの冒頭で取得済み
                 'running': "🟢 実行中 (Running)",
                 'stopped': "⚪ 停止済み (Stopped)",
                 'pending': "🟡 起動準備中... (Pending)",
@@ -158,9 +193,119 @@ def execute_ec2_command(command_name):
             }
             status_text = state_map.get(state, state)
             return f"現在のサーバー状態: {status_text}"
+        elif command_name == 'restore':
+            # サブコマンドの取得 (list/select)
+            options = command_data.get('options', []) if command_data else []
+            sub_cmd = options[0] if options else {}
+            
+            if sub_cmd.get('name') == 'list':
+                # 日付オプションの取得
+                sub_options = sub_cmd.get('options', [])
+                date_str = next((opt['value'] for opt in sub_options if opt['name'] == 'date'), None)
+                
+                # JSTタイムゾーンの定義
+                jst = timezone(timedelta(hours=9))
+                if not date_str:
+                    date_str = datetime.now(jst).strftime('%Y%m%d')
+                
+                print(f"Listing versions for date: {date_str}")
+                
+                try:
+                    # 全てのバージョンを取得
+                    versions = s3.list_object_versions(Bucket=S3_BUCKET, Prefix=SAVE_FILE_KEY)
+                    
+                    main_save_versions_for_date = [] # セーブのバージョンを格納
+                    for v in versions.get('Versions', []):
+                        key = v['Key']
+                        # UTCからJSTへ変換
+                        jst_modified = v['LastModified'].astimezone(jst)
+                        if jst_modified.strftime('%Y%m%d') == date_str:
+                            main_save_versions_for_date.append(v)
+
+                    found_versions_display = []
+
+                    # セーブの全バージョンを表示
+                    main_save_versions_for_date.sort(key=lambda x: x['LastModified'], reverse=True) # 最新順にソート
+                    for v in main_save_versions_for_date:
+                        jst_modified = v['LastModified'].astimezone(jst)
+                        is_latest_s3 = " ⭐" if v.get('IsLatest') else ""
+                        time_str = jst_modified.strftime('%H:%M:%S')
+                        filename = v['Key'] # S3バケットのルートに直接save.zipがあるため、キーがそのままファイル名
+                        found_versions_display.append(f"[{filename}] `{v['VersionId']}` - {time_str}{is_latest_s3}")
+
+                    if not found_versions_display:
+                        return f"📅 {date_str} のセーブバックアップは見つかりませんでした。"
+                    
+                    res_msg = f"📅 **{date_str} のバックアップ一覧 (JST)**\n"
+                    res_msg += "\n".join(found_versions_display)
+                    res_msg += "\n\n復元するには `/restore select version_id:<ID>` を実行してください。\n(※セーブ直後は一覧への反映に時間がかかる場合があります)"
+                    return res_msg
+                    
+                except Exception as e:
+                    print(f"S3 List Error: {e}")
+                    return f"❌ バージョン一覧の取得中にエラーが発生しました。"
+            elif sub_cmd.get('name') == 'select':
+                # 1. 状態確認（停止中のみ許可）
+                res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
+                state = res['Reservations'][0]['Instances'][0]['State']['Name']
+                if state != 'stopped':
+                    return "❌ 復元操作を行う前に、サーバーを停止してください。"
+
+                # イベントから version_id を取得
+                sub_options = sub_cmd.get('options', [])
+                version_id = next((opt['value'] for opt in sub_options if opt['name'] == 'version_id'), None)
+
+                if not version_id:
+                    return "❌ 復元するバージョンIDが指定されていません。"
+
+                # 2. 復元処理 (指定されたバージョンを最新としてコピー)
+                try:
+                    print(f"Restoring {SAVE_FILE_KEY} from VersionId: {version_id}")
+                    s3.copy_object(
+                        Bucket=S3_BUCKET,
+                        Key=SAVE_FILE_KEY,
+                        CopySource={'Bucket': S3_BUCKET, 'Key': SAVE_FILE_KEY, 'VersionId': version_id}
+                    )
+                    return f"✅ セーブデータの復元が完了しました。\n対象: `{SAVE_FILE_KEY}`\nVersionId: `{version_id}`"
+                except ClientError as e:
+                    error_code = e.response['Error']['Code']
+                    print(f"S3 Copy Error: {e}")
+                    return f"❌ 復元に失敗しました: {error_code}。バージョンIDが正しいか、またはS3バケットが存在するか確認してください。"
+
+        elif command_name == 'save':
+            print("Executing /save command: Saving Factorio server.")
+
+            if state == 'running' and ip:
+                password = get_rcon_password()
+                print(f"Sending /server-save to {ip}:{RCON_PORT}")
+                rcon_res = run_rcon_command(ip, RCON_PORT, password, "/server-save")
+                print(f"RCON Response: {rcon_res}")
+                if "RCON Connection Error" in rcon_res or "RCON Authentication Failed" in rcon_res:
+                    return f"❌ セーブに失敗しました。RCON接続を確認してください: {rcon_res}"
+                elif "Saving the map" in rcon_res:
+                    # OSのバッファをS3マウントポイントへ強制書き出し
+                    print(f"Triggering OS sync via SSM on {INSTANCE_ID}...")
+                    ssm.send_command(
+                        InstanceIds=[INSTANCE_ID],
+                        DocumentName="AWS-RunShellScript",
+                        Parameters={'commands': ["sync"]}
+                    )
+                    return "✅ セーブが完了しました。(S3同期開始)"
+                else:
+                    return f"⚠️ セーブコマンドは実行されましたが、予期せぬ応答です: {rcon_res}"
+            elif state == 'stopped':
+                return "⚪ サーバーは停止しています。セーブは実行できません。"
+            else:
+                return f"🟡 サーバーは現在 {state} 状態です。セーブは実行できません。"
 
         return f"不明なコマンドです: {command_name}"
 
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code == 'IncorrectInstanceState':
+            return "現在停止処理中のため、しばらく待ってから再度お試しください。"
+        print(f"EC2 ClientError: {e}")
+        return f"❌ AWS操作中にエラーが発生しました: {error_code}"
     except Exception as e:
         print(f"EC2 Error: {e}")
         return f"❌ AWS操作中にエラーが発生しました: {str(e)}"
@@ -179,7 +324,7 @@ def handle_discord_command(event):
         return {"status": "error", "reason": "missing credentials"}
 
     # 共通ロジックの実行
-    message = execute_ec2_command(command_name)
+    message = execute_ec2_command(command_name, event.get('data'))
 
     # 特殊な戻り値をユーザー向けメッセージに変換
     if message == "ALREADY_RUNNING":
@@ -243,7 +388,7 @@ def handle_scheduled_monitor_event(event):
                 webhook_url = get_webhook_url()
                 
                 # 共通ロジックで停止を実行
-                shutdown_message = execute_ec2_command('stop')
+                shutdown_message = execute_ec2_command('stop', {}) # スケジュールイベントではDiscordコンテキストがないため、S3イベント通知は発生しない
                 print(shutdown_message)
 
                 if shutdown_message not in ["ALREADY_RUNNING", "ALREADY_STOPPED"]:
@@ -298,7 +443,7 @@ def lambda_handler(event, context):
             return handle_scheduled_monitor_event(event)
         else:
             # stop や start などの個別アクションを実行
-            message = execute_ec2_command(action)
+            message = execute_ec2_command(action, {}) # スケジュールイベントではコマンドデータは不要
             
             # すでに目的の状態であった場合は通知をスキップ
             if message not in ["ALREADY_RUNNING", "ALREADY_STOPPED"]:
