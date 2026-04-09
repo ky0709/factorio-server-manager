@@ -5,7 +5,7 @@ from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
 
 # 環境変数
-PUBLIC_KEY = os.environ['DISCORD_PUBLIC_KEY']
+PUBLIC_KEY = os.environ.get('DISCORD_PUBLIC_KEY')
 CHILD_LAMBDA_NAME = 'Factorio_Executor' 
 
 lambda_client = boto3.client('lambda')
@@ -48,6 +48,14 @@ def lambda_handler(event, context):
             content = "🛑 サーバーを停止しています..."
         elif command_name == 'status':
             content = "現在のサーバー状態を確認しています..."
+        elif command_name == 'restore':
+            sub_cmd_name = data.get('data', {}).get('options', [{}])[0].get('name')
+            if sub_cmd_name == 'list':
+                content = "⏳ セーブデータの一覧を取得しています..."
+            elif sub_cmd_name == 'select':
+                content = "⏳ セーブデータの復元処理を開始します..."
+        elif command_name == 'save':
+            content = "💾 セーブを実行しています..."
         else:
             content = "リクエストを受理しました。"
 
