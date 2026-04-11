@@ -3,6 +3,7 @@ import requests
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
 from dotenv import load_dotenv
+import time
 
 # スクリプトの場所を基準にプロジェクトルートを取得
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,57 +23,136 @@ AWS_SESSION_TOKEN = os.getenv('AWS_SESSION_TOKEN')
 # 同期対象の機密情報
 SECRETS_TO_SYNC = {
     'DISCORD_WEBHOOK_URL': '/factorio/DISCORD_WEBHOOK_URL',
-    'RCON_PASSWORD': '/factorio/RCON_PASSWORD'
+    'DISCORD_LOG_WEBHOOK_URL': '/factorio/DISCORD_LOG_WEBHOOK_URL',
+    'RCON_PASSWORD': '/factorio/RCON_PASSWORD',
+    'ADMIN_USER_IDS': '/factorio/ADMIN_USER_IDS',
+    'ADMIN_ROLE_IDS': '/factorio/ADMIN_ROLE_IDS',
+    'RESTRICTED_COMMAND_STRINGS': '/factorio/RESTRICTED_COMMAND_STRINGS',
+    'DISCORD_PUBLIC_KEY': '/factorio/DISCORD_PUBLIC_KEY',
+    'EXECUTOR_LAMBDA_NAME': '/factorio/EXECUTOR_LAMBDA_NAME',
+    'NOTIFIER_LAMBDA_NAME': '/factorio/NOTIFIER_LAMBDA_NAME',
+    'INTERACTOR_LAMBDA_NAME': '/factorio/INTERACTOR_LAMBDA_NAME',
+    'AWS_REGION': '/factorio/REGION',
+    'INSTANCE_ID': '/factorio/INSTANCE_ID',
+    'EPHEMERAL_COMMAND_STRINGS': '/factorio/EPHEMERAL_COMMAND_STRINGS',
+    'DYNAMODB_TABLE_NAME': '/factorio/DYNAMODB_TABLE_NAME',
+    'S3_BUCKET_NAME': '/factorio/S3_BUCKET_NAME',
+    'WORKER_LAMBDA_NAME': '/factorio/WORKER_LAMBDA_NAME',
+    'COMMAND_ROUTING': '/factorio/COMMAND_ROUTING',
+    'RCON_PORT': '/factorio/RCON_PORT',
+    'SAVE_FILE_KEY': '/factorio/SAVE_FILE_KEY',
+    'GAME_PASSWORD': '/factorio/GAME_PASSWORD',
+    'FACTORIO_GAME_PORT': '/factorio/FACTORIO_GAME_PORT',
+    'RCON_COMMAND_TIMEOUT_SECONDS': '/factorio/RCON_COMMAND_TIMEOUT_SECONDS',
+    'RCON_UNRESPONSIVE_THRESHOLD': '/factorio/RCON_UNRESPONSIVE_THRESHOLD',
+    'ZERO_PLAYER_THRESHOLD': '/factorio/ZERO_PLAYER_THRESHOLD',
+    'S3_SYNC_WAIT_THRESHOLD_SECONDS': '/factorio/S3_SYNC_WAIT_THRESHOLD_SECONDS',
+    'RCON_READY_CHECK_INTERVAL_SECONDS': '/factorio/RCON_READY_CHECK_INTERVAL_SECONDS',
+    'RCON_READY_CHECK_MAX_ATTEMPTS': '/factorio/RCON_READY_CHECK_MAX_ATTEMPTS',
 }
 
 def register_commands():
     print("--- Registering Discord Commands ---")
     url = f"https://discord.com/api/v10/applications/{APP_ID}/guilds/{GUILD_ID}/commands"
 
+    # .env から制限対象コマンドのリストを取得
+    restricted_raw = os.getenv('RESTRICTED_COMMAND_STRINGS', '')
+    restricted_set = {s.strip() for s in restricted_raw.split(',') if s.strip()}
+
     commands = [
     {
         "name": "start",
-        "description": "Factorioサーバーを起動します"
+        "description": "Start the Factorio server",
+        "description_localizations": {
+            "ja": "Factorioサーバーを起動します"
+        }
     },
     {
         "name": "stop",
-        "description": "Factorioサーバーを停止します"
+        "description": "Save and stop the Factorio server",
+        "description_localizations": {
+            "ja": "セーブを実行し、Factorioサーバーを停止します"
+        }
     },
     {
         "name": "status",
-        "description": "サーバーの現在の起動状態を確認します"
+        "description": "Check server status, players, and last save time",
+        "description_localizations": {
+            "ja": "サーバー状態、プレイヤー、最終セーブ日時等を確認します"
+        }
+    },
+    {
+        "name": "pass",
+        "description": "Display the game password",
+        "description_localizations": {
+            "ja": "ゲームのパスワードを表示します"
+        }
+    },
+    {
+        "name": "license",
+        "description": "Show software license information",
+        "description_localizations": {
+            "ja": "本ソフトウェアのライセンス情報を表示します"
+        }
     },
     {
         "name": "save",
-        "description": "Factorioサーバーのセーブを実行します"
+        "description": "Save the current game state",
+        "description_localizations": {
+            "ja": "現在のゲーム状態をセーブします"
+        }
     },
     {
         "name": "restore",
-        "description": "セーブデータを過去のバージョンから復元します",
+        "description": "Restore save data from a previous version",
+        "description_localizations": {
+            "ja": "セーブデータを過去のバージョンから復元します"
+        },
         "options": [
             {
                 "name": "list",
-                "description": "指定した日付のセーブデータ一覧を表示します（例: 20260409）",
+                "description": "Display a list of save data history",
                 "type": 1,
+                "description_localizations": {
+                    "ja": "セーブデータの履歴一覧を表示します"
+                },
                 "options": [
                     {
                         "name": "date",
-                        "description": "検索する日付 (YYYYMMDD)。指定しない場合は本日分を表示",
+                        "description": "Date to search (YYYYMMDD). Defaults to today.",
                         "type": 3,
-                        "required": False
+                        "required": False,
+                        "description_localizations": {
+                            "ja": "検索する日付 (YYYYMMDD)。指定なしで本日分"
+                        }
+                    },
+                    {
+                        "name": "count",
+                        "description": "Show the latest specified number of items (Max 20, takes precedence over date)",
+                        "type": 4,
+                        "required": False,
+                        "description_localizations": {
+                            "ja": "最新の指定件数を表示 (最大20件, 日付指定より優先)"
+                        }
                     }
                 ]
             },
             {
                 "name": "select",
-                "description": "指定したバージョンIDのセーブデータを復元します",
+                "description": "Restore save data using a specific version ID",
                 "type": 1,
+                "description_localizations": {
+                    "ja": "指定したバージョンIDのセーブデータを復元します"
+                },
                 "options": [
                     {
                         "name": "version_id",
-                        "description": "復元したいS3のバージョンID",
+                        "description": "The version ID to restore",
                         "type": 3,
-                        "required": True
+                        "required": True,
+                        "description_localizations": {
+                            "ja": "復元したいバージョンID"
+                        }
                     }
                 ]
             }
@@ -80,24 +160,64 @@ def register_commands():
     }
 ]
 
+    # 権限制限があるコマンドの説明文に注釈を自動追記
+    for cmd in commands:
+        # 親コマンドのチェック (例: start, stop)
+        if cmd['name'] in restricted_set:
+            cmd['description'] = f"[Restricted] {cmd['description']}"
+            if 'description_localizations' in cmd and 'ja' in cmd['description_localizations']:
+                cmd['description_localizations']['ja'] = f"[管理者限定] {cmd['description_localizations']['ja']}"
+
+        # サブコマンドのチェック (例: restore:select)
+        if 'options' in cmd:
+            for opt in cmd['options']:
+                # type 1 は SUB_COMMAND
+                if opt.get('type') == 1:
+                    full_path = f"{cmd['name']}:{opt['name']}"
+                    if full_path in restricted_set:
+                        opt['description'] = f"[Restricted] {opt['description']}"
+                        if 'description_localizations' in opt and 'ja' in opt['description_localizations']:
+                            opt['description_localizations']['ja'] = f"[管理者限定] {opt['description_localizations']['ja']}"
+
+
     headers = {
         "Authorization": f"Bot {BOT_TOKEN}",
         "Content-Type": "application/json"
     }
 
     for cmd in commands:
-        response = requests.post(url, headers=headers, json=cmd, timeout=10)
-        if response.status_code in [200, 201]:
-            print(f"✅ Command '{cmd['name']}': Success!")
-        else:
-            print(f"❌ Command '{cmd['name']}': Failed ({response.status_code})")
-            print(response.text)
+        while True:
+            response = requests.post(url, headers=headers, json=cmd, timeout=10)
+            if response.status_code in [200, 201]:
+                print(f"✅ Command '{cmd['name']}': Success!")
+                break
+            elif response.status_code == 429:
+                # レートリミット発生時、Discordからの指示に従って待機
+                retry_after = response.json().get('retry_after', 1)
+                print(f"⏳ Rate limited. Retrying command '{cmd['name']}' in {retry_after}s...")
+                time.sleep(retry_after + 0.1)
+                continue
+            else:
+                print(f"❌ Command '{cmd['name']}': Failed ({response.status_code})")
+                print(response.text)
+                break
+        
+        # 次のコマンド登録までに標準的な待機時間を置く
+        time.sleep(0.5)
 
 def sync_secrets_to_ssm():
     print("\n--- Syncing Secrets to AWS SSM Parameter Store ---")
     try:
         ssm = boto3.client(
             'ssm',
+            region_name=AWS_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            aws_session_token=AWS_SESSION_TOKEN
+        )
+        
+        lambda_client = boto3.client(
+            'lambda',
             region_name=AWS_REGION,
             aws_access_key_id=AWS_ACCESS_KEY_ID,
             aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
@@ -117,9 +237,41 @@ def sync_secrets_to_ssm():
                 Name=ssm_path,
                 Value=value,
                 Type='SecureString',
+                Tier='Standard',
                 Overwrite=True
             )
             print(f"✅ Successfully synced {env_key}")
+
+        # --- Lambda キャッシュのリフレッシュ ---
+        print("\n--- Refreshing Lambda Caches ---")
+        target_lambdas = [
+            os.getenv('EXECUTOR_LAMBDA_NAME'),
+            os.getenv('WORKER_LAMBDA_NAME'),
+            os.getenv('NOTIFIER_LAMBDA_NAME'),
+            os.getenv('INTERACTOR_LAMBDA_NAME')
+        ]
+        sync_time = str(int(time.time()))
+
+        for lb in target_lambdas:
+            if not lb: continue
+            try:
+                # 環境変数を一つ更新することで、全インスタンスを強制再起動させる
+                lambda_client.update_function_configuration(
+                    FunctionName=lb,
+                    Environment={'Variables': {
+                        **{k: v for k, v in os.environ.items() if k in [
+                            'INSTANCE_ID', 
+                            'DYNAMODB_TABLE_NAME', 
+                            'S3_BUCKET_NAME', 
+                            'SAVE_FILE_KEY',
+                            'DISCORD_PUBLIC_KEY' # Interactorの高速化のために追加
+                        ]}, 
+                        'LAST_SSM_SYNC': sync_time
+                    }}
+                )
+                print(f"♻️  Forced refresh for {lb}")
+            except Exception as e:
+                print(f"⚠️  Could not refresh {lb}: {e}")
 
     except (NoCredentialsError, PartialCredentialsError):
         print("❌ Error: AWS credentials not found. Please run 'aws configure'.")

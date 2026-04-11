@@ -6,9 +6,9 @@ Discordのスラッシュコマンドから、AWS上のFactorio専用サーバ�
 
 ## 🛠 特徴
 - **サーバーレスな管理レイヤー**: Discordからのリクエストを AWS Lambda + API Gateway で直接処理するため、Factorioゲームサーバーの**管理に常駐サーバーは不要**です。Factorioゲームサーバー自体はEC2インスタンス上で動作します。
-- **非同期アーキテクチャ**: Discordの「3秒ルール（応答制限）」を回避するため、受付用（Interactions）と実行用（Executor）の親子Lambda構成を採用しています。
+- **4層分離アーキテクチャ**: 責務を「受付（Interactor）」「実行（Executor）」「履歴・監視（Worker）」「通知（Notifier）」に分離。スケーラビリティと保守性を高め、Discordの応答制限（3秒ルール）を完全に回避します。
 - **多重系の停止ロジック (Robust Shutdown)**: 無人検知と定時停止を組み合わせた堅牢なコスト最適化に加え、OSレベルの `_netdev` 制御と Lambda からの **Lazy Unmount** 命令による二段構えの保護を実装。ネットワーク切断時の OS フリーズや NFS ハングアップを徹底的に排除したクリーンシャットダウンを実現しています。
-- **セキュリティ**: Discordからのリクエスト署名検証（Ed25519）を実装し、不正なアクセスを遮断します。
+- **高度なセキュリティと権限管理**: Discord署名検証（Ed25519）に加え、SSM管理された管理者ID/ロールによるコマンド実行制限（デフォルト：`/restore select`）を実装。制限対象は `.env` の `RESTRICTED_COMMAND_STRINGS` で自由に変更可能で、設定されたコマンドには Discord 上の説明文に自動的に「[管理者限定]」のタグが付与されます。
 - **機密情報の自動同期**: ローカルの `.env` に記載した機密情報を、コマンド登録時に AWS SSM へ自動的に同期・アップロードします。
 - **簡易なセーブデータ管理**: `/save` コマンドによる手動セーブ、`/restore` コマンドによるS3バージョニングを活用した過去データへの復元が可能です。
 - **Amazon S3 Files (s3files-utils) によるコスト効率と機能性**: 
@@ -18,23 +18,26 @@ Discordのスラッシュコマンドから、AWS上のFactorio専用サーバ�
   - **断続的アクセスの最適化**: Factorio のセーブデータのような「書き込み時のみ高負荷」なパターンに特化したコスト構造。
   - **既存アプリとの完全互換**: ゲームサーバー本体に一切の変更を加えず、標準のローカルディレクトリとして透過的に利用可能。
 
-- **データ整合性の保証**: 停止時に `Factorio停止` -> `OSキャッシュのフラッシュ(sync)` -> `SSM経由のNFSアンマウント` を自動実行。S3 への書き込み完了（ライトバック）を確実にしてからインスタンスを停止するため、データ破損と書き込み漏れのリスクを最小限に抑えます。
+- **データ整合性と可視化**: 停止時に `Factorio停止` -> `カタログ更新` -> `アンマウント` -> `EC2停止` を自動実行。S3への反映待ち状態（同期中）をリアルタイムで検知し、`/status` や `/restore list` に表示することで、データ喪失を防ぎます。
+- **自動テスト環境**: `test_runner.py` により、各LambdaのロジックやAWSリソースとの疎通を網羅的に検証可能。テスト結果はDiscordのログチャットへ自動レポートされます。
 
 ## 🏗 システム構成
 1. **Discord User**: `/start` / `/stop` / `/status` コマンドを実行
 2. **API Gateway**: Discordからのリクエストを Interactor Lambda へ転送
 3. **Interactor Lambda (Parent)**: 署名検証を行い、即座に「受付完了」を返信。Executor Lambda を非同期で起動
-4. **Executor Lambda (Child)**: 
-    - **コマンド実行**: EC2の起動/停止、RCON経由のセーブ、および **SSM経由の S3 Files アンマウント** を実行。完了後に Discord の初期応答を PATCH で更新
-    - **定期監視**: EventBridgeからのトリガーを受け、プレイヤー数をチェック。無人状態が続けば自動停止を実行
-5. **DynamoDB**: 無人状態の継続回数を保持
-6. **SSM Parameter Store**: RCONパスワードやDiscord Webhook URLなどの機密情報を安全に保持
-7. **Amazon S3**: S3 Files (s3files-utils) を通じて EC2 にマウントされ、セーブデータを保持
+4. **Executor Lambda (Execution)**: EC2の起動/停止、RCONセーブ、SSMコマンド等の実効処理を担当。
+5. **Worker Lambda (Management)**: 
+    - **データ管理**: S3バージョニング履歴の取得、セーブデータの復元を実行。
+    - **定期監視**: EventBridgeトリガーを受け、無人停止チェック (`auto-check`) を実行。
+6. **Notifier Lambda (Notification)**: 
+    - **対話通知**: Interaction Token を使用し、コマンドへの追加報告（Followup POST）を送信
+    - **ログ通知**: インフラの状態変更やテストレポートを Webhook 経由で管理チャンネルへ投稿。
+7. **DynamoDB / SSM / S3**: 状態保持（マーカー）、機密情報管理、およびセーブデータストレージ
 
 ## 🚀 技術スタック
 - **Language**: Python 3.12
 - **Infrastructure**: AWS (Lambda, API Gateway, EC2, IAM, DynamoDB, SSM, EventBridge)
-- **Library**: 
+- **Library**:
   - `boto3` (AWS SDK)
   - `PyNaCl` (Signature Verification)
   - `requests`, `python-dotenv`
@@ -45,12 +48,12 @@ Discordのスラッシュコマンドから、AWS上のFactorio専用サーバ�
 - **Python 3.12**: ローカルマシンにインストール済みであること。
 - **Factorio サーバー**: EC2(Linux) 上で稼働しており、RCONが有効化されていること。
 - **Amazon S3 Files (s3files-utils)**: EC2 に mountpoint-s3 および s3files-utils がインストールされており、s3files タイプでマウント可能であること。
-- **EC2 IAM ロール**: `aws/IAM/EC2-Factorio-Server-RolePolicy/policy.json` に基づく S3 バケットへのアクセス権限が付与されていること。
+- **EC2 IAM ロール**: `aws/IAM/FactorioServerPolicy/policy.json` に基づく S3 バケットへのアクセス権限が付与されていること。
 
 ##  フォルダ構成
 - `aws/`: AWS関連の設定ファイル
   - `IAM/`: 最小権限の原則（Least Privilege）に基づくポリシー設定（テンプレート `.example` と生成後の `.json`）
-  - `Lambda/`: `Interactions`（受付用）と `Executor`（実行用）のソースコード
+  - `Lambda/`: `Interactor`（受付）、`Executor`（実行）、`Notifier`（通知）のソースコード
 - `docs/`: 開発ロードマップ等
 - `scripts/`: 管理・設定用スクリプト
   - `setup_config.py`: `.env` の値を使用して IAM ポリシーのテンプレートを置換・生成するスクリプト
@@ -58,7 +61,43 @@ Discordのスラッシュコマンドから、AWS上のFactorio専用サーバ�
 - `.env`: ローカル環境用の認証情報およびAWS同期用設定（Git管理対象外）
 - `requirements.txt`: ローカル環境用ライブラリ
 
-## 📝 セットアップ
+## 🆕 開発者向けセットアップ・チェックリスト
+新規に環境を構築する際は、以下の項目を順に完了させてください。
+
+### 1. Discord 側の準備
+- [ ] Discord Developer Portal で Application を作成する
+- [ ] Bot を作成し `DISCORD_TOKEN` を取得する
+- [ ] `APP_ID` (Application ID) と `DISCORD_PUBLIC_KEY` を取得する
+- [ ] 導入先サーバーの `GUILD_ID` を取得する
+- [ ] 通知用とログ用の Webhook を作成し、それぞれの URL を取得する
+- [ ] 管理者として権限を付与するユーザーの ID (`ADMIN_USER_IDS`) を特定する
+
+### 2. AWS 側の準備
+- [ ] 使用する `AWS_REGION` を決定する (例: `ap-northeast-1`)
+- [ ] `AWS_ACCOUNT_ID` を確認する
+- [ ] Factorio 用の EC2 インスタンスを起動し、`INSTANCE_ID` を取得する
+- [ ] セーブデータ保存用の S3 バケットを作成する
+- [ ] 状態管理用の DynamoDB テーブル (`DYNAMODB_TABLE_NAME`) を作成する (パーティションキー: `ConfigKey`)
+- [ ] 使用する Lambda 関数名および IAM ポリシー名がプロジェクトの命名規則に合っているか確認する
+
+### 3. ローカル環境の構築
+- [ ] `python --version` が 3.12 以上であることを確認する
+- [ ] `.env.example` をコピーして `.env` を作成する
+- [ ] 上記 1, 2 で収集した値をすべて `.env` に記入する
+- [ ] `pip install -r requirements.txt` を実行して依存関係をインストールする
+- [ ] `aws configure` 等で、デプロイに必要な適切な権限を持つ AWS 認証情報を設定する
+
+### 4. 初期デプロイフロー
+- [ ] `python scripts/setup_config.py` を実行して、環境に合わせた IAM ポリシーファイルを生成する
+- [ ] `python scripts/deploy_policies.py` を実行して、AWS 上に IAM ポリシーをデプロイする
+- [ ] `python scripts/update_layer.py` を実行して、共通モジュール (Lambda Layer) をデプロイする
+- [ ] `python scripts/deploy_lambda.py` を実行して、Lambda 関数をデプロイする
+- [ ] `python scripts/register.py` を実行して、Discord コマンドの登録と SSM への機密情報同期を行う
+- [ ] `python scripts/test_runner.py` を実行して、システム全体の疎通を確認する
+
+---
+
+## 📝 詳細なセットアップ手順
 
 ### 1. ローカル：機密情報の準備と同期
 1. **[ローカル]** `.env.example` をコピーして `.env` を作成し、Discord の各設定値と、AWS の `AWS_REGION`, `AWS_ACCOUNT_ID`, `INSTANCE_ID`, `S3_BUCKET_NAME` を入力する。**`AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY` は、ステップ4でIAMユーザーのアクセスキーが発行された後に追記してください。**
@@ -69,19 +108,19 @@ Discordのスラッシュコマンドから、AWS上のFactorio専用サーバ�
 
 ### 2. AWS：インフラリソースの構築
 1. **[AWSコンソール]** DynamoDB テーブル `FactorioState` を作成する（パーティションキー: `ConfigKey` (文字列)）。
-2. **[AWSコンソール]** Lambda 関数 (Interactor, Executor) の環境変数を以下の通り設定する。
-    - `Factorio_Executor`: `INSTANCE_ID`, `RCON_PORT`, `REGION`, `DYNAMODB_TABLE_NAME`, `S3_BUCKET_NAME`, `SAVE_FILE_KEY` (デフォルトは `save.zip`)
-    - `Factorio_Interactor`: `DISCORD_PUBLIC_KEY`
-4. **[ローカル]** `mkdir python && pip install pynacl -t ./python && zip -r pynacl_layer.zip python` を実行してレイヤーを作成する。
-4. **[AWSコンソール]** `pynacl_layer.zip` を Lambda レイヤーとして登録し、`Factorio_Interactor` に適用する。
-7. **[AWSコンソール]** EventBridge Scheduler を作成し、`Factorio_Executor` を以下の JSON ペイロードで呼び出すように設定する。
-    - **無人監視 (5分おき)**: `{"action": "auto-check"}`
-    - **定時停止 (毎日深夜など)**: `{"action": "stop"}`
+2. **[AWSコンソール]** Lambda 関数 (Interactor, Executor, Notifier) の環境変数を以下の通り設定する。
+    - ※機密情報やリソース名は `register.py` によって SSM Parameter Store へ同期されるため、手動設定は最小限で済みます。
+    - 署名検証用の `PyNaCl` レイヤーを `Factorio_Interactor` に適用してください。
+    - 共通ユーティリティレイヤーは `scripts/update_layer.py` によって自動的に紐付けられます。
+7. **[AWSコンソール]** EventBridge Scheduler を作成し、それぞれ以下のターゲットと JSON ペイロードで呼び出すように設定する。
+    - **無人監視 (5分おき)**: ターゲット `Factorio_Worker` / ペイロード `{"action": "auto-check"}`
+    - **定時停止 (毎日深夜など)**: ターゲット `Factorio_Executor` / ペイロード `{"action": "stop"}`
+    - **EC2状態通知**: EventBridgeルールを作成し、`stopped`/`running` 時に `Factorio_Executor` を呼び出すよう設定します。
 
 ### 3. サーバー：EC2 側及びデータの初期化
 1. **[AWSコンソール]** セキュリティグループで、Lambda/VPC からの **TCP 27015** (RCON) および **UDP 34197** (Factorio) を許可する。
 2. **[SSH]** Factorio サーバーの起動オプションに `--rcon-port 27015 --rcon-password <パスワード>` を追加する。
-3. **[AWSコンソール]** EC2 インスタンスに付与する IAM ロールを作成し、`aws/IAM/EC2-Factorio-Server-RolePolicy/policy.json` の権限を適用する。
+3. **[AWSコンソール]** EC2 インスタンスに付与する IAM ロールを作成し、`aws/IAM/FactorioServerPolicy/policy.json` の権限を適用する。
 4. **[SSH]** S3 Files マウントポイントの作成と権限設定:
    ```bash
    sudo mkdir -p /mnt/factorio-saves
@@ -97,9 +136,13 @@ Discordのスラッシュコマンドから、AWS上のFactorio専用サーバ�
 6. **[AWSコンソール]** DynamoDB の `FactorioState` テーブルに、初期データとして `{ "ConfigKey": "ZeroPlayerCount", "CountValue": 0 }` を手動で作成する。
 
 ## 🚀 デプロイ
-1. **[AWSコンソール/CLI]** `aws/Lambda/Factorio_Interactor/lambda_function.py` のコードを親Lambdaに関数デプロイ。
-2. **[AWSコンソール/CLI]** `aws/Lambda/Factorio_Executor/lambda_function.py` のコードを子Lambdaに関数デプロイ。
-3. **[AWSコンソール]** 両方のLambda関数の実行ロールに `aws/IAM/FactorioControlPolicy/policy.json` を適用する。
+1. **[AWSコンソール/CLI]** `aws/Lambda/Factorio_Interactor/lambda_function.py` をデプロイ。
+2. **[AWSコンソール/CLI]** `aws/Lambda/Factorio_Executor/lambda_function.py` をデプロイ。
+3. **[AWSコンソール/CLI]** `aws/Lambda/Factorio_Notifier/lambda_function.py` をデプロイ。
+4. **[AWSコンソール]** 各Lambdaの実行ロールに適切なポリシーを適用する。
+    - `Factorio_Interactor`: `aws/IAM/FactorioInteractPolicy/policy.json`
+    - `Factorio_Executor`: `aws/IAM/FactorioExecutePolicy/policy.json`
+    - `Factorio_Notifier`: `aws/IAM/FactorioNotifyPolicy/policy.json`
 
 ## ⚠️ 運用上の注意
 - **メンテナンス時の自動停止**: 
@@ -107,4 +150,4 @@ Discordのスラッシュコマンドから、AWS上のFactorio専用サーバ�
   作業中にプレイヤーが 0 人の状態が続くと、自動停止ロジックが作動してインスタンスが強制的にシャットダウンされる可能性があります。
 
 ## ⚖️ License
-MIT License
+[MIT License](LICENSE)

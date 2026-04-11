@@ -1,0 +1,26 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowSSMParameterRead",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameters",
+                "ssm:GetParametersByPath"
+            ],
+            "Resource": [
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/*"
+            ]
+        },
+        {
+            "Sid": "AllowInvokeDownstreamLambdas",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": [
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<EXECUTOR_LAMBDA_NAME>",
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<WORKER_LAMBDA_NAME>",
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<NOTIFIER_LAMBDA_NAME>"
+            ]
+        }
+    ]
+}

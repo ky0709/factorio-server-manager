@@ -1,4 +1,5 @@
 import os
+import sys
 from dotenv import load_dotenv
 
 def setup_configs():
@@ -7,21 +8,54 @@ def setup_configs():
 
     # .env ファイルをルートから読み込む
     load_dotenv(os.path.join(BASE_DIR, ".env"))
-    
-    # 置換対象のリスト
-    replacements = {
-        "<REGION>": os.getenv('AWS_REGION'),
-        "<ACCOUNT_ID>": os.getenv('AWS_ACCOUNT_ID'),
-        "<INSTANCE_ID>": os.getenv('INSTANCE_ID'),
-        "<S3_BUCKET_NAME>": os.getenv('S3_BUCKET_NAME'),
-        "<SAVE_FILE_KEY>": os.getenv('SAVE_FILE_KEY'),
+
+    # 環境変数名とプレースホルダーの対応定義
+    env_mapping = {
+        'AWS_REGION': "<REGION>",
+        'AWS_ACCOUNT_ID': "<ACCOUNT_ID>",
+        'INSTANCE_ID': "<INSTANCE_ID>",
+        'S3_BUCKET_NAME': "<S3_BUCKET_NAME>",
+        'SAVE_FILE_KEY': "<SAVE_FILE_KEY>",
+        'EXECUTOR_LAMBDA_NAME': "<EXECUTOR_LAMBDA_NAME>",
+        'WORKER_LAMBDA_NAME': "<WORKER_LAMBDA_NAME>",
+        'NOTIFIER_LAMBDA_NAME': "<NOTIFIER_LAMBDA_NAME>",
+        'INTERACTOR_LAMBDA_NAME': "<INTERACTOR_LAMBDA_NAME>",
+        'INTERACT_POLICY_NAME': "<INTERACT_POLICY_NAME>",
+        'EXECUTE_POLICY_NAME': "<EXECUTE_POLICY_NAME>",
+        'NOTIFY_POLICY_NAME': "<NOTIFY_POLICY_NAME>",
+        'SERVER_POLICY_NAME': "<SERVER_POLICY_NAME>",
+        'REGIST_POLICY_NAME': "<REGIST_POLICY_NAME>",
+        'WORK_POLICY_NAME': "<WORK_POLICY_NAME>",
     }
+
+    replacements = {}
+    missing_vars = []
+
+    for env_key, placeholder in env_mapping.items():
+        # INTERACTOR_LAMBDA_NAME はデフォルト値を持つため、None にならない
+        default = 'Factorio_Interactor' if env_key == 'INTERACTOR_LAMBDA_NAME' else None
+        val = os.getenv(env_key, default)
+
+        if val is None:
+            missing_vars.append(env_key)
+        else:
+            replacements[placeholder] = val.strip()
+
+    if missing_vars:
+        print("❌ Error: The following environment variables are missing in .env:")
+        for var in missing_vars:
+            print(f"   - {var}")
+        print("\nAborting setup. Please define these variables in your .env file.")
+        sys.exit(1)
 
     # テンプレートファイルと出力先の対応
     targets = [
-        os.path.join(BASE_DIR, "aws/IAM/FactorioControlPolicy/policy.json"),
-        os.path.join(BASE_DIR, "aws/IAM/EC2-Factorio-Server-RolePolicy/policy.json"),
-        os.path.join(BASE_DIR, "aws/IAM/FactorioRegistPolicy/policy.json")
+        os.path.join(BASE_DIR, "aws/IAM/FactorioInteractPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioExecutePolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioNotifyPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioServerPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioRegistPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioWorkPolicy/policy.json")
     ]
 
     print("--- Generating IAM Policies from Templates ---")

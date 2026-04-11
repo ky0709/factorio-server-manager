@@ -1,460 +1,408 @@
-import boto3
-from botocore.exceptions import ClientError
 import json
-import os
-import time
-import socket
-import struct
-import urllib.request
 import re
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime
 
-# 環境変数の読み込み
-INSTANCE_ID = os.environ.get('INSTANCE_ID')
-REGION = os.environ.get('REGION')
-RCON_PORT = int(os.environ.get('RCON_PORT', '27015'))
-DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
-SAVE_FILE_KEY = os.environ.get('SAVE_FILE_KEY', 'save.zip') # メインセーブファイルのS3キー
-S3_BUCKET = os.environ.get('S3_BUCKET_NAME')
+# レイヤーからのインポート
+from factorio_common.utils import JST, get_client, fetch_config_from_ssm, run_rcon_command, format_msg, notify_via_lambda
 
-ec2 = boto3.client('ec2', region_name=REGION)
-ssm = boto3.client('ssm', region_name=REGION)
-dynamodb = boto3.resource('dynamodb', region_name=REGION)
-factorio_state_table = dynamodb.Table(DYNAMODB_TABLE_NAME)
-s3 = boto3.client('s3', region_name=REGION)
+TEXT_RESOURCES = {
+    "common": {
+        "unknown_cmd": {"ja": "❌ 不明なコマンドです。", "en": "❌ Unknown command."},
+        "server_offline": {"ja": "❌ サーバーが起動していないため、この操作は実行できません。", "en": "❌ Server is not running."},
+    },
+    "status": {
+        "running": {
+            "ja": "✅ **稼働中**\n- 接続先: `{ip}:{port}`\n- オンライン: `{players}`名 (`{names}`)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
+            "en": "✅ **Running**\n- Address: `{ip}:{port}`\n- Online: `{players}` (`{names}`)\n- Last Save: `{save_time}` (`{size}`MB)"
+        },
+        "stopped": {
+            "ja": "🔴 **停止中**\n- 最終セーブ: `{save_time}` (`{size}`MB)",
+            "en": "🔴 **Stopped**\n- Last Save: `{save_time}` (`{size}`MB)"
+        },
+        "transition": {"ja": "⏳ **状態遷移中** (`{state}`)", "en": "⏳ **Transitioning** (`{state}`)"},
+        "starting": {
+            "ja": "⏳ **起動処理中** (経過時間: `{elapsed}`秒)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
+            "en": "⏳ **Starting Process** (Elapsed: `{elapsed}`s)\n- Last Save: `{save_time}` (`{size}`MB)"
+        },
+        "stopping": {
+            "ja": "⏳ **停止処理中** (経過時間: `{elapsed}`秒)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
+            "en": "⏳ **Stopping Process** (Elapsed: `{elapsed}`s)\n- Last Save: `{save_time}` (`{size}`MB)"
+        },
+        "syncing": {
+            "ja": "⏳ (S3同期中...) ",
+            "en": "⏳ (S3 Syncing...) "
+        }
+    },
+    "start": {
+        "success": {"ja": "🚀 サーバーの起動を開始しました。", "en": "🚀 Starting server..."},
+        "already": {"ja": "⚠️ サーバーは既に起動しているか、準備中です。", "en": "⚠️ Server is already running or pending."},
+        "completed": {
+            "ja": "- 接続先: `{ip}:{port}`\n- パスワード: `{pwd}`",
+            "en": "- Address: `{ip}:{port}`\n- Password: `{pwd}`"
+        },
+        "completed_title": {
+            "ja": "✨ Factorio サーバー起動完了",
+            "en": "✨ Factorio Server Ready"
+        }
+    },
+    "stop": {
+        "success": {"ja": "🔌 サーバーの停止を開始しました (セーブ・クリーンアップ実行中)。", "en": "🔌 Stopping server (Saving and cleaning up...)"},
+        "already": {"ja": "⚠️ サーバーは既に停止しているか、停止処理中です。", "en": "⚠️ Server is already stopped or stopping."},
+        "process_stopped": {"ja": "⏹️ Factorioプロセスを正常に終了しました。", "en": "⏹️ Factorio process stopped successfully."},
+        "completed": {"ja": "✅ サーバーの全停止工程が完了しました。", "en": "✅ Server shutdown sequence completed."}
+    },
+    "save": {
+        "success": {"ja": "💾 セーブコマンドを送信しました。S3への反映には数分かかる場合があります。", "en": "💾 Save command sent. S3 sync may take a few minutes."},
+    },
+    "pass": {
+        "not_set": {"ja": "❌ パスワードは設定されていません。", "en": "❌ Password is not set."},
+        "display": {"ja": "🔑 パスワード: `{pwd}`", "en": "🔑 Password: `{pwd}`"}
+    },
+    "license": {
+        "content": {
+            "ja": "### 📜 License Information\n本ソフトウェアは **MIT License** の下で公開されています。\n\n**■ 許諾事項**\nどなたでも無償で本ソフトウェアの使用、複写、変更、結合、掲載、頒布、サブライセンス、および販売を行うことができます。\n\n**■ 利用条件**\nすべての複製または重要な部分に、後述の著作権表示および本許諾表示を記載する必要があります。\n\n**■ 免責事項**\n本ソフトウェアは「現状のまま」提供されます。作者は、ソフトウェアの使用に起因する損害やその他の責任について一切の義務を負いません。\n\n---\n**Copyright (c) 2026 ky0709**\n**GitHub:** https://github.com/ky0709/factorio-server-manager",
+            "en": "### 📜 License Information\nThis software is published under the **MIT License**.\n\n**■ Permissions**\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software.\n\n**■ Conditions**\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\n**■ Disclaimer**\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND. THE AUTHORS OR COPYRIGHT HOLDERS SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY.\n\n---\n**Copyright (c) 2026 ky0709**\n**GitHub:** https://github.com/ky0709/factorio-server-manager"
+        }
+    }
+}
 
-def send_webhook_message(url, content):
-    """Discord Webhookにメッセージを送信する"""
-    if not url:
-        print("Warning: DISCORD_WEBHOOK_URL is not set.")
+COLOR_GREEN = 0x2ECC71
+COLOR_RED = 0xE74C3C
+COLOR_YELLOW = 0xF1C40F
+COLOR_BLUE = 0x3498DB
+
+def get_msg(category, key, locale='ja', **kwargs):
+    return format_msg(TEXT_RESOURCES, category, key, locale, **kwargs)
+
+config = {"initialized": False}
+
+def init_config():
+    ssm_config = fetch_config_from_ssm('/factorio/')
+    config.update(ssm_config)
+    global factorio_state_table
+    factorio_state_table = get_client('dynamodb', True).Table(config.get('dynamodb_table_name'))
+    config["initialized"] = True
+
+def notify(content, mode='followup', event=None, embeds=None, components=None):
+    # テストモード時は Discord への通知処理をスキップ
+    if config.get("test_mode"):
+        print(f"DEBUG: [Test Mode] Notification suppressed: {content}")
         return
-
-    payload = json.dumps({"content": content}).encode('utf-8')
-    req = urllib.request.Request(url, data=payload, method='POST')
-    req.add_header('Content-Type', 'application/json')
-    req.add_header('User-Agent', 'DiscordBot (FactorioManager, 1.0)')
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            print(f"Webhook Response ({response.status})")
-    except Exception as e:
-        print(f"Webhook Send Failed: {e}")
-
-def get_rcon_password():
-    """SSM Parameter StoreからSecureStringのパスワードを取得"""
-    print("Fetching RCON password from SSM...")
-    response = ssm.get_parameter(
-        Name='/factorio/RCON_PASSWORD',
-        WithDecryption=True
+    notify_via_lambda(
+        config['notifier_lambda_name'],
+        content,
+        mode=mode,
+        event=event,
+        embeds=embeds,
+        components=components
     )
-    return response['Parameter']['Value']
 
-def get_webhook_url():
-    """SSM Parameter StoreからWebhook URLを取得"""
-    print("Fetching Webhook URL from SSM...")
-    response = ssm.get_parameter(
-        Name='/factorio/DISCORD_WEBHOOK_URL',
-        WithDecryption=True
-    )
-    return response['Parameter']['Value']
+def execute_ec2_command(action, event):
+    locale = event.get('locale', 'ja')
+    ec2 = get_client('ec2')
+    inst = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
+    state = inst['State']['Name']
+    ip = inst.get('PublicIpAddress')
 
-def run_rcon_command(ip, port, password, command):
-    """FactorioサーバーにRCONコマンドを送信する (Source RCON Protocol)"""
-    try:
-        with socket.create_connection((ip, port), timeout=5) as sock:
-            def send_packet(pkt_id, pkt_type, body):
-                # Packet format: Size(4), ID(4), Type(4), Body(str), Term(2)
-                data = struct.pack('<ii', pkt_id, pkt_type) + body.encode('utf-8') + b'\x00\x00'
-                sock.sendall(struct.pack('<i', len(data)) + data)
+    if action == 'status':
+        # カタログから現在のセーブ時刻を取得 (全状態で共通)
+        save_time = "-"
+        save_size = "-"
+        res_cat = {}
+        try:
+            res_cat = factorio_state_table.get_item(Key={'ConfigKey': 'LatestSaveInfo'})
+            if 'Item' in res_cat:
+                save_time = datetime.fromisoformat(res_cat['Item']['Timestamp']).strftime('%Y/%m/%d %H:%M:%S')
+                save_size = res_cat['Item'].get('FileSize', "-")
+        except: pass
 
-            def receive_packet():
-                raw_size = sock.recv(4)
-                if not raw_size: return -1, -1, ""
-                size = struct.unpack('<i', raw_size)[0]
-                data = sock.recv(size)
-                pkt_id, pkt_type = struct.unpack('<ii', data[:8])
-                return pkt_id, pkt_type, data[8:-2].decode('utf-8', errors='ignore')
+        # 1. 進行中プロセスの検知 (不整合を防ぐため、実際の状態と組み合わせて判定)
+        try:
+            # 停止処理中: インスタンスがまだ完全に停止していない場合のみマーカーを有効とする
+            if state != 'stopped':
+                res_stop = factorio_state_table.get_item(Key={'ConfigKey': 'StopStartTime'})
+                if 'Item' in res_stop:
+                    start_time_str = res_stop['Item'].get('Timestamp')
+                    if start_time_str:
+                        elapsed = int(time.time() - float(start_time_str))
+                        return get_msg("status", "stopping", locale, elapsed=elapsed, save_time=save_time, size=save_size)
 
-            # 1. 認証 (Type 3: SERVERDATA_AUTH)
-            send_packet(1, 3, password)
-            pkt_id, _, _ = receive_packet()
-            if pkt_id == -1: return "RCON Authentication Failed (Invalid Password)"
+            # 起動処理中: 起動完了(RCON成功)で削除されるため、存在すれば表示
+            res_start = factorio_state_table.get_item(Key={'ConfigKey': 'StartStartTime'})
+            if 'Item' in res_start:
+                if state != 'stopped': # 停止中なのに起動マーカーがある場合は無視
+                    start_time_str = res_start['Item'].get('Timestamp')
+                    if start_time_str:
+                        elapsed = int(time.time() - float(start_time_str))
+                        return get_msg("status", "starting", locale, elapsed=elapsed, save_time=save_time, size=save_size)
+        except Exception as e:
+            print(f"In-progress check error: {e}")
 
-            # 2. コマンド実行 (Type 2: SERVERDATA_EXECCOMMAND)
-            send_packet(2, 2, command)
-            _, _, response = receive_packet()
-            return response
-    except Exception as e:
-        return f"RCON Connection Error: {str(e)}"
+        # 2. 停止中の場合は S3 を完全にスキップ (早期リターン)
+        if state == 'stopped':
+            return get_msg("status", "stopped", locale, save_time=save_time, size=save_size)
 
-def get_player_count(ip, port, password):
-    """RCONでオンラインプレイヤー数を取得する"""
-    try:
-        response = run_rcon_command(ip, port, password, "/players online")
-        # Expected response format: "Online players (1):" or "Online players (0)"
-        match = re.search(r'Online players \((\d+)\)', response, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-        print(f"Could not parse player count from RCON response: {response}")
-        return -1 # Indicate parsing failure
-    except Exception as e:
-        print(f"Error getting player count via RCON: {e}")
-        return -1
+        # 3. 稼働中または遷移中の場合のみ S3 を確認して同期状態を判定
+        status_prefix = ""
+        try:
+            db_timestamp = res_cat.get('Item', {}).get('Timestamp')
 
-
-def execute_ec2_command(command_name, command_data=None):
-    """EC2の起動・停止・状態確認のコアロジック"""
-    print(f"Executing EC2 command: {command_name}")
-    try:
-        # 1. 最新のインスタンス状態とIPを取得
-        res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-        instance = res['Reservations'][0]['Instances'][0]
-        state = instance['State']['Name']
-        ip = instance.get('PublicIpAddress')
-
-        if command_name == 'start':
-            if state == 'running':
-                return "ALREADY_RUNNING"
-
-            print(f"Starting EC2 (Current state: {state})...")
-            ec2.start_instances(InstanceIds=[INSTANCE_ID])
-            waiter = ec2.get_waiter('instance_running')
-            # 起動には30秒以上かかることが多いため、MaxAttemptsを12（60秒）に拡張
-            waiter.wait(InstanceIds=[INSTANCE_ID], WaiterConfig={'Delay': 5, 'MaxAttempts': 12})
-            res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-            ip = res['Reservations'][0]['Instances'][0].get('PublicIpAddress', '取得中...')
-            return f"✅ Factorioサーバーが起動しました。\n接続先: `{ip}:34197`"
+            s3 = get_client('s3')
+            s3_meta = s3.head_object(Bucket=config['s3_bucket_name'], Key=config['save_file_key'])
             
-        elif command_name == 'stop':
-            # すでに停止している場合は特殊なステータスを返す
-            if state == 'stopped':
-                return "ALREADY_STOPPED"
+            # 容量の取得とMB変換
+            size_bytes = s3_meta.get('ContentLength', 0)
+            size_mb = size_bytes / (1024 * 1024)
+            save_size = round(size_mb, 1)
 
-            if state == 'running' and ip:
-                password = get_rcon_password()
-                print(f"Sending /server-save to {ip}:{RCON_PORT}")
-                rcon_res = run_rcon_command(ip, RCON_PORT, password, "/server-save")
-                print(f"RCON Response: {rcon_res}")
-                time.sleep(2)
+            s3_dt = s3_meta['LastModified'].astimezone(JST)
+            save_time = s3_dt.strftime('%Y/%m/%d %H:%M:%S')
 
-                # クリーンシャットダウン・シーケンス
-                # 1. サービス停止 (ファイルハンドル解放) -> 2. sync (キャッシュ書き出し) -> 3. umount
-                shutdown_commands = [
-                    "sudo systemctl stop factorio",
-                    "sync",
-                    "sudo umount -l /mnt/factorio-saves"
-                ]
-                
-                print(f"Executing cleanup commands via SSM on {INSTANCE_ID}...")
+            # 秒単位で比較するために時刻を正規化
+            db_dt_norm = datetime.fromisoformat(db_timestamp).replace(microsecond=0) if db_timestamp else None
+            s3_dt_norm = s3_dt.replace(microsecond=0)
+
+            if db_dt_norm and db_dt_norm > s3_dt_norm:
+                status_prefix = get_msg("status", "syncing", locale)
+                # 同期中の場合はカタログ（セーブ実行時）の時刻を表示に採用
+                save_time = db_dt_norm.strftime('%Y/%m/%d %H:%M:%S')
+
+            # --- ベストプラクティス: カタログの自動更新 (副作用) ---
+            # S3の方が新しい場合のみカタログを更新。この失敗は表示を妨げてはならない。
+            if not db_timestamp or s3_dt.isoformat() > db_timestamp:
                 try:
-                    send_res = ssm.send_command(
-                        InstanceIds=[INSTANCE_ID],
-                        DocumentName="AWS-RunShellScript",
-                        Parameters={'commands': shutdown_commands}
+                    factorio_state_table.update_item(
+                        Key={'ConfigKey': 'LatestSaveInfo'},
+                        UpdateExpression="set #ts = :val, #sz = :sz",
+                        ExpressionAttributeNames={'#ts': 'Timestamp', '#sz': 'FileSize'},
+                        ExpressionAttributeValues={':val': s3_dt.isoformat(), ':sz': str(save_size)}
                     )
-                    command_id = send_res['Command']['CommandId']
-                    
-                    # 最大30秒間、クリーンアップの完了を待機
-                    for i in range(6): # 5秒 * 6回 = 30秒
-                        try:
-                            invocations = ssm.list_command_invocations(CommandId=command_id, InstanceId=INSTANCE_ID)['CommandInvocations']
-                            if invocations:
-                                status = invocations[0]['Status']
-                                if status in ['Success', 'Failed', 'Cancelled', 'TimedOut']: # TimedOutも考慮
-                                    print(f"Cleanup commands finished with status: {status}")
-                                    break
-                                else:
-                                    print(f"SSM command status: {status}. Waiting...")
-                            else:
-                                print(f"SSM command invocation {command_id} not yet available. Waiting...")
-                        except ClientError as ce:
-                            print(f"Error checking SSM command status (ClientError): {ce}. Proceeding with instance stop.")
-                            break # クライアントエラーが発生した場合は待機を中断
-                        except Exception as e:
-                            print(f"Unexpected error checking SSM command status: {e}. Proceeding with instance stop.")
-                            break # 予期せぬエラーが発生した場合は待機を中断
-                        time.sleep(5)
-                except Exception as e:
-                    print(f"Lazy unmount failed: {e}. Proceeding with instance stop.")
+                    print(f"ℹ️ Catalog auto-synced with S3: {save_time}")
+                except Exception as db_update_err:
+                    # ログ出力のみ行い、処理は続行する
+                    print(f"⚠️ Non-critical: Failed to update DynamoDB catalog: {db_update_err}")
 
-            ec2.stop_instances(InstanceIds=[INSTANCE_ID])
-            print("Waiting for instance to enter 'stopped' state...")
-            waiter = ec2.get_waiter('instance_stopped')
-            waiter.wait(InstanceIds=[INSTANCE_ID], WaiterConfig={'Delay': 5, 'MaxAttempts': 24})
-            return "✅ セーブ完了を確認し、サーバーを停止しました。"
+        except Exception as e:
+            print(f"S3/Catalog Sync Error: {e}")
 
-        elif command_name == 'status':
-            print("Checking EC2 status...")
-            state_map = { # state変数はexecute_ec2_commandの冒頭で取得済み
-                'running': "🟢 実行中 (Running)",
-                'stopped': "⚪ 停止済み (Stopped)",
-                'pending': "🟡 起動準備中... (Pending)",
-                'stopping': "🟡 停止処理中... (Stopping)"
-            }
-            status_text = state_map.get(state, state)
-            return f"現在のサーバー状態: {status_text}"
-        elif command_name == 'restore':
-            # サブコマンドの取得 (list/select)
-            options = command_data.get('options', []) if command_data else []
-            sub_cmd = options[0] if options else {}
+        display_save_time = f"{status_prefix}{save_time}"
+
+        if state == 'running':
+            res_rcon = run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/players online")
+            # 改行を含む全出力を対象にし、名前部分を抽出
+            match = re.search(r"Online players \((\d+)\):?([\s\S]*)", res_rcon)
+            p_count = match.group(1) if match else "?"
+            raw_names = match.group(2) if match else ""
+            # 各行から (online) 等のステータス表記を除去し、リスト化
+            names_list = [re.sub(r"\s*\(.*?\)", "", n).strip() for n in raw_names.splitlines() if n.strip()]
+            p_names = ", ".join(names_list) if names_list else "-"
+            return get_msg("status", "running", locale, ip=ip, port=config.get('factorio_game_port', 34197), players=p_count, names=p_names, save_time=display_save_time, size=save_size)
+        
+        return get_msg("status", "transition", locale, state=state, save_time=display_save_time, size=save_size)
+
+    elif action == 'start':
+        if state == 'stopped':
+            start_process_time = time.time()
+
+            # 以前の停止処理マーカーが残っている可能性があるため強制削除
+            factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
+
+            # イベント検知時の経過時間算出用に開始時刻を記録
+            factorio_state_table.update_item(
+                Key={'ConfigKey': 'StartStartTime'},
+                UpdateExpression="set #ts = :val",
+                ExpressionAttributeNames={'#ts': 'Timestamp'},
+                ExpressionAttributeValues={':val': str(start_process_time)}
+            )
+
+            ec2.start_instances(InstanceIds=[config['instance_id']])
             
-            if sub_cmd.get('name') == 'list':
-                # 日付オプションの取得
-                sub_options = sub_cmd.get('options', [])
-                date_str = next((opt['value'] for opt in sub_options if opt['name'] == 'date'), None)
-                
-                # JSTタイムゾーンの定義
-                jst = timezone(timedelta(hours=9))
-                if not date_str:
-                    date_str = datetime.now(jst).strftime('%Y%m%d')
-                
-                print(f"Listing versions for date: {date_str}")
-                
-                try:
-                    # 全てのバージョンを取得
-                    versions = s3.list_object_versions(Bucket=S3_BUCKET, Prefix=SAVE_FILE_KEY)
-                    
-                    main_save_versions_for_date = [] # セーブのバージョンを格納
-                    for v in versions.get('Versions', []):
-                        key = v['Key']
-                        # UTCからJSTへ変換
-                        jst_modified = v['LastModified'].astimezone(jst)
-                        if jst_modified.strftime('%Y%m%d') == date_str:
-                            main_save_versions_for_date.append(v)
+            # 内部仕様: 起動完了までポーリング待機 (Lambdaタイムアウトに注意)
+            # RCONが通る＝ゲームプロセス起動完了とみなす
+            time.sleep(10) # 起動直後の待機
+            max_attempts = int(config.get('rcon_ready_check_max_attempts', 12))
+            interval = int(config.get('rcon_ready_check_interval_seconds', 10))
+            
+            for _ in range(max_attempts):
+                # IPがまだ取れない場合があるため再取得
+                inst_refresh = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
+                current_ip = inst_refresh.get('PublicIpAddress')
+                if current_ip:
+                    check = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], "/version")
+                    if "Error" not in check:
+                        elapsed = int(time.time() - start_process_time)
+                        # ログチャットに詳細な起動時間を通知
+                        notify(f"🚀 [LOG] Factorio server is ready on {current_ip}:{config.get('factorio_game_port', 34197)}. (Time taken: {elapsed}s)", mode='log')
+                        
+                        # 起動が確認できたので、ステータス表示用の起動マーカーを削除
+                        factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
 
-                    found_versions_display = []
+                        # パスワードとポート情報を取得して完了メッセージを生成
+                        pwd = config.get("game_password", "-")
+                        port = config.get('factorio_game_port', 34197)
+                        return {
+                            "embeds": [{
+                                "title": get_msg("start", "completed_title", locale),
+                                "description": get_msg("start", "completed", locale, ip=current_ip, port=port, pwd=pwd),
+                                "color": COLOR_GREEN
+                            }]
+                        }
+                time.sleep(interval)
 
-                    # セーブの全バージョンを表示
-                    main_save_versions_for_date.sort(key=lambda x: x['LastModified'], reverse=True) # 最新順にソート
-                    for v in main_save_versions_for_date:
-                        jst_modified = v['LastModified'].astimezone(jst)
-                        is_latest_s3 = " ⭐" if v.get('IsLatest') else ""
-                        time_str = jst_modified.strftime('%H:%M:%S')
-                        filename = v['Key'] # S3バケットのルートに直接save.zipがあるため、キーがそのままファイル名
-                        found_versions_display.append(f"[{filename}] `{v['VersionId']}` - {time_str}{is_latest_s3}")
+            return get_msg("start", "success", locale)
+        return get_msg("start", "already", locale)
 
-                    if not found_versions_display:
-                        return f"📅 {date_str} のセーブバックアップは見つかりませんでした。"
-                    
-                    res_msg = f"📅 **{date_str} のバックアップ一覧 (JST)**\n"
-                    res_msg += "\n".join(found_versions_display)
-                    res_msg += "\n\n復元するには `/restore select version_id:<ID>` を実行してください。\n(※セーブ直後は一覧への反映に時間がかかる場合があります)"
-                    return res_msg
-                    
-                except Exception as e:
-                    print(f"S3 List Error: {e}")
-                    return f"❌ バージョン一覧の取得中にエラーが発生しました。"
-            elif sub_cmd.get('name') == 'select':
-                # 1. 状態確認（停止中のみ許可）
-                res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-                state = res['Reservations'][0]['Instances'][0]['State']['Name']
-                if state != 'stopped':
-                    return "❌ 復元操作を行う前に、サーバーを停止してください。"
+    elif action == 'stop':
+        if state == 'running':
+            start_stop_time = time.time()
 
-                # イベントから version_id を取得
-                sub_options = sub_cmd.get('options', [])
-                version_id = next((opt['value'] for opt in sub_options if opt['name'] == 'version_id'), None)
+            # 以前の起動処理マーカーが残っている可能性があるため強制削除
+            factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
 
-                if not version_id:
-                    return "❌ 復元するバージョンIDが指定されていません。"
-
-                # 2. 復元処理 (指定されたバージョンを最新としてコピー)
-                try:
-                    print(f"Restoring {SAVE_FILE_KEY} from VersionId: {version_id}")
-                    s3.copy_object(
-                        Bucket=S3_BUCKET,
-                        Key=SAVE_FILE_KEY,
-                        CopySource={'Bucket': S3_BUCKET, 'Key': SAVE_FILE_KEY, 'VersionId': version_id}
-                    )
-                    return f"✅ セーブデータの復元が完了しました。\n対象: `{SAVE_FILE_KEY}`\nVersionId: `{version_id}`"
-                except ClientError as e:
-                    error_code = e.response['Error']['Code']
-                    print(f"S3 Copy Error: {e}")
-                    return f"❌ 復元に失敗しました: {error_code}。バージョンIDが正しいか、またはS3バケットが存在するか確認してください。"
-
-        elif command_name == 'save':
-            print("Executing /save command: Saving Factorio server.")
-
-            if state == 'running' and ip:
-                password = get_rcon_password()
-                print(f"Sending /server-save to {ip}:{RCON_PORT}")
-                rcon_res = run_rcon_command(ip, RCON_PORT, password, "/server-save")
-                print(f"RCON Response: {rcon_res}")
-                if "RCON Connection Error" in rcon_res or "RCON Authentication Failed" in rcon_res:
-                    return f"❌ セーブに失敗しました。RCON接続を確認してください: {rcon_res}"
-                elif "Saving the map" in rcon_res:
-                    # OSのバッファをS3マウントポイントへ強制書き出し
-                    print(f"Triggering OS sync via SSM on {INSTANCE_ID}...")
-                    ssm.send_command(
-                        InstanceIds=[INSTANCE_ID],
-                        DocumentName="AWS-RunShellScript",
-                        Parameters={'commands': ["sync"]}
-                    )
-                    return "✅ セーブが完了しました。(S3同期開始)"
-                else:
-                    return f"⚠️ セーブコマンドは実行されましたが、予期せぬ応答です: {rcon_res}"
-            elif state == 'stopped':
-                return "⚪ サーバーは停止しています。セーブは実行できません。"
-            else:
-                return f"🟡 サーバーは現在 {state} 状態です。セーブは実行できません。"
-
-        return f"不明なコマンドです: {command_name}"
-
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        if error_code == 'IncorrectInstanceState':
-            return "現在停止処理中のため、しばらく待ってから再度お試しください。"
-        print(f"EC2 ClientError: {e}")
-        return f"❌ AWS操作中にエラーが発生しました: {error_code}"
-    except Exception as e:
-        print(f"EC2 Error: {e}")
-        return f"❌ AWS操作中にエラーが発生しました: {str(e)}"
-
-
-def handle_discord_command(event):
-    print(f"Received event: {json.dumps(event)}")
-    token = event.get('token')
-    app_id = event.get('application_id')
-    command_name = event.get('action') or event.get('data', {}).get('name')
-
-    print(f"Parsed data: command={command_name}, app_id={app_id}, has_token={'Yes' if token else 'No'}")
-
-    if not token or not app_id:
-        print("Error: Missing token or application_id.")
-        return {"status": "error", "reason": "missing credentials"}
-
-    # 共通ロジックの実行
-    message = execute_ec2_command(command_name, event.get('data'))
-
-    # 特殊な戻り値をユーザー向けメッセージに変換
-    if message == "ALREADY_RUNNING":
-        message = "🟢 サーバーは既に起動しています。"
-    elif message == "ALREADY_STOPPED":
-        message = "⚪ サーバーは既に停止しています。"
-
-    # Discordへの報告
-    edit_url = f"https://discord.com/api/v10/webhooks/{app_id}/{token}/messages/@original"
-    payload = json.dumps({"content": message}).encode('utf-8')
-    req = urllib.request.Request(edit_url, data=payload, method='PATCH')
-    req.add_header('Content-Type', 'application/json')
-    req.add_header('User-Agent', 'DiscordBot (FactorioManager, 1.0)')
-
-    print(f"Sending PATCH to Discord: {edit_url}")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            print(f"Discord Response ({response.status})")
-    except Exception as e:
-        print(f"Discord Update Failed: {e}")
-
-    return {"status": "done"}
-
-
-def handle_scheduled_monitor_event(event):
-    print("Processing scheduled monitor event...")
-    try:
-        response = factorio_state_table.get_item(Key={'ConfigKey': 'ZeroPlayerCount'})
-        item = response.get('Item', {'ConfigKey': 'ZeroPlayerCount', 'CountValue': 0})
-        zero_player_count = item['CountValue']
-        print(f"Current ZeroPlayerCount from DynamoDB: {zero_player_count}")
-    except Exception as e:
-        print(f"Error getting ZeroPlayerCount from DynamoDB: {e}")
-        return {"status": "error", "reason": f"DynamoDB read error: {str(e)}"}
-
-    try:
-        res = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-        instance_state = res['Reservations'][0]['Instances'][0]['State']['Name']
-        instance_ip = res['Reservations'][0]['Instances'][0].get('PublicIpAddress')
-        print(f"EC2 instance state: {instance_state}, IP: {instance_ip}")
-    except Exception as e:
-        print(f"Error describing EC2 instance: {e}")
-        return {"status": "error", "reason": f"EC2 describe error: {str(e)}"}
-
-    if instance_state == 'running' and instance_ip:
-        rcon_password = get_rcon_password()
-        online_players = get_player_count(instance_ip, RCON_PORT, rcon_password)
-        print(f"Online players: {online_players}")
-
-        if online_players == 0:
-            new_zero_player_count = zero_player_count + 1
+            # イベント検知時の経過時間算出用に開始時刻を記録
             factorio_state_table.update_item(
-                Key={'ConfigKey': 'ZeroPlayerCount'},
-                UpdateExpression='SET CountValue = :val',
-                ExpressionAttributeValues={':val': new_zero_player_count}
+                Key={'ConfigKey': 'StopStartTime'},
+                UpdateExpression="set #ts = :val",
+                ExpressionAttributeNames={'#ts': 'Timestamp'},
+                ExpressionAttributeValues={':val': str(start_stop_time)}
             )
-            print(f"Incremented ZeroPlayerCount to: {new_zero_player_count}")
 
-            if new_zero_player_count >= 3:
-                print("Zero players for 3 consecutive checks. Initiating auto-shutdown...")
-                webhook_url = get_webhook_url()
-                
-                # 共通ロジックで停止を実行
-                shutdown_message = execute_ec2_command('stop', {}) # スケジュールイベントではDiscordコンテキストがないため、S3イベント通知は発生しない
-                print(shutdown_message)
-
-                if shutdown_message not in ["ALREADY_RUNNING", "ALREADY_STOPPED"]:
-                    send_webhook_message(webhook_url, f"【自動停止】{shutdown_message}")
-
-                factorio_state_table.update_item(
-                    Key={'ConfigKey': 'ZeroPlayerCount'},
-                    UpdateExpression='SET CountValue = :val',
-                    ExpressionAttributeValues={':val': 0}
-                )
-                print("ZeroPlayerCount reset to 0 after auto-shutdown.")
-            else:
-                print(f"Zero players detected. Count: {new_zero_player_count}. Not yet at shutdown threshold.")
-        elif online_players > 0:
-            if zero_player_count > 0:
-                factorio_state_table.update_item(
-                    Key={'ConfigKey': 'ZeroPlayerCount'},
-                    UpdateExpression='SET CountValue = :val',
-                    ExpressionAttributeValues={':val': 0}
-                )
-                print("Players detected. ZeroPlayerCount reset to 0.")
-            else:
-                print("Players detected. ZeroPlayerCount already 0.")
-        else:
-            print("Skipping count update due to RCON connection error.")
-
-    else:
-        if zero_player_count > 0:
+            # 1. セーブの実行 (RCON)
+            run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
+            
+            # カタログ (DynamoDB) を更新
             factorio_state_table.update_item(
-                Key={'ConfigKey': 'ZeroPlayerCount'},
-                UpdateExpression='SET CountValue = :val',
-                ExpressionAttributeValues={':val': 0}
+                Key={'ConfigKey': 'LatestSaveInfo'},
+                UpdateExpression="set #ts = :val",
+                ExpressionAttributeNames={'#ts': 'Timestamp'},
+                ExpressionAttributeValues={':val': datetime.now(JST).isoformat()}
             )
-            print("EC2 not running or IP not available. ZeroPlayerCount reset to 0.")
-        else:
-            print("EC2 not running or IP not available. ZeroPlayerCount already 0.")
-    
-    return {"status": "done", "message": "Scheduled monitor event processed."}
 
+            # 2. Factorioサーバー停止 & アンマウント準備 (SSM)
+            ssm = get_client('ssm')
+            ssm.send_command(
+                InstanceIds=[config['instance_id']],
+                DocumentName="AWS-RunShellScript",
+                Parameters={'commands': ["sudo systemctl stop factorio"]}
+            )
+
+            # 3. アンマウント実行 (SSM)
+            # サービス停止後、少し待ってから実行
+            time.sleep(5)
+            ssm.send_command(
+                InstanceIds=[config['instance_id']],
+                DocumentName="AWS-RunShellScript",
+                Parameters={'commands': ["sudo umount /mnt/factorio-saves || true"]}
+            )
+            
+            # 4. EC2停止
+            ec2.stop_instances(InstanceIds=[config['instance_id']])
+            
+            # 6. メインチャットへの完了報告 (これによって Interactor のメッセージが PATCH される)
+            return get_msg("stop", "process_stopped", locale)
+        return get_msg("stop", "already", locale)
+
+    elif action == 'save':
+        if state != 'running': return get_msg("common", "server_offline", locale)
+        run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
+        # カタログ (DynamoDB) を更新
+        factorio_state_table.update_item(
+            Key={'ConfigKey': 'LatestSaveInfo'},
+            UpdateExpression="set #ts = :val",
+            ExpressionAttributeNames={'#ts': 'Timestamp'},
+            ExpressionAttributeValues={':val': datetime.now(JST).isoformat()}
+        )
+        return get_msg("save", "success", locale)
+
+    elif action == 'pass':
+        pwd = config.get("game_password")
+        return get_msg("pass", "display", locale, pwd=pwd) if pwd else get_msg("pass", "not_set", locale)
+
+    elif action == 'license':
+        return {
+            "embeds": [{
+                "title": "⚖️ MIT License",
+                "description": get_msg("license", "content", locale),
+                "footer": {"text": "ky0709/factorio-server-manager"},
+                "color": COLOR_BLUE
+            }]
+        }
+
+    return get_msg("common", "unknown_cmd", locale)
 
 def lambda_handler(event, context):
-    """
-    メインハンドラー: Discordコマンド、自動無人監視(auto-check)、
-    および定時実行(stop/start)の多重停止ロジックを制御します。
-    """
-    is_scheduled = event.get('source') == 'aws.events' or 'action' in event
-    is_discord = event.get('token') and event.get('application_id')
+    if not config["initialized"]: init_config()
 
-    if is_scheduled and not is_discord:
-        action = event.get('action', 'auto-check')
-        if action == 'auto-check':
-            return handle_scheduled_monitor_event(event)
+    # EventBridge からの EC2 状態変更通知の処理
+    if event.get('source') == 'aws.ec2' and event.get('detail-type') == 'EC2 Instance State-change Notification':
+        detail = event.get('detail', {})
+        instance_id = detail.get('instance-id', '')
+        
+        # state が辞書形式 {'name': 'stopped'} か、文字列 "stopped" かを判定して取得
+        raw_state = detail.get('state')
+        if isinstance(raw_state, dict):
+            state_name = raw_state.get('name')
         else:
-            # stop や start などの個別アクションを実行
-            message = execute_ec2_command(action, {}) # スケジュールイベントではコマンドデータは不要
-            
-            # すでに目的の状態であった場合は通知をスキップ
-            if message not in ["ALREADY_RUNNING", "ALREADY_STOPPED"]:
-                webhook_url = get_webhook_url()
-                send_webhook_message(webhook_url, f"【定時実行】{message}")
+            state_name = raw_state
 
-            return {"status": "done", "message": message}
+        # デバッグログ: 受信したイベントの内容を出力
+        print(f"DEBUG: Received EC2 event for {instance_id} state={state_name}. Expected ID={config.get('instance_id')}")
 
-    if is_discord:
-        return handle_discord_command(event)
+        # インスタンスIDの比較 (常に正規化して比較)
+        if instance_id and instance_id.strip("'\" ") == str(config.get("instance_id", "")).strip("'\" "):
+            if state_name == 'stopped':
+                # 停止開始時刻を DynamoDB から取得して経過時間を算出
+                res = factorio_state_table.get_item(Key={'ConfigKey': 'StopStartTime'})
+                start_time_str = res.get('Item', {}).get('Timestamp')
+                
+                elapsed_msg = ""
+                if start_time_str:
+                    elapsed = int(time.time() - float(start_time_str))
+                    elapsed_msg = f" (Total sequence time: {elapsed}s)"
+                
+                notify(f"🔌 [LOG] EC2 Instance ({instance_id}) has stopped. Shutdown sequence completed.{elapsed_msg}", mode='log')
+                factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
+                return {"status": "ok"}
+            elif state_name == 'running':
+                # 起動開始時刻を DynamoDB から取得して経過時間を算出
+                res = factorio_state_table.get_item(Key={'ConfigKey': 'StartStartTime'})
+                start_time_str = res.get('Item', {}).get('Timestamp')
+                
+                elapsed_msg = ""
+                if start_time_str:
+                    elapsed = int(time.time() - float(start_time_str))
+                    elapsed_msg = f" (EC2 boot time: {elapsed}s)"
+                
+                notify(f"🚀 [LOG] EC2 Instance ({instance_id}) is now running.{elapsed_msg}", mode='log')
+                factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
+                return {"status": "ok"}
+        
+        # イベント対象外であっても、EventBridgeイベントであるならここで終了させる
+        return {"status": "event_handled_or_ignored"}
 
-    else:
-        print(f"Unknown event type received: {json.dumps(event)}")
-        return {"status": "error", "reason": "Unknown event type"}
+    action = event.get('action')
+    locale = event.get('locale', 'ja')
+    test_mode = event.get('test_mode', False)
+    config["test_mode"] = test_mode # notify ラッパーで参照するために保存
+
+    # 更新(PATCH)対象の判定
+    notify_mode = 'patch' if action in ['status', 'pass', 'license'] else 'followup'
+    
+    result = execute_ec2_command(action, event)
+    
+    # If in test_mode, return the result directly for inspection
+    if test_mode:
+        if isinstance(result, dict): # For embeds
+            return {"content": None, "embeds": result.get('embeds'), "mode": notify_mode}
+        else: # For plain text
+            return {"content": result, "embeds": None, "mode": notify_mode}
+
+    # Discord Interaction (Tokenが存在する) 場合のみ、応答を返す
+    if event.get('token'):
+        if isinstance(result, dict):
+            notify(None, mode=notify_mode, event=event, embeds=result.get('embeds'))
+        else:
+            notify(result, mode=notify_mode, event=event)
+        
+    return {"status": "ok"}

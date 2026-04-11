@@ -8,8 +8,56 @@
                 "ssm:PutParameter"
             ],
             "Resource": [
-                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/RCON_PASSWORD",
-                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/DISCORD_WEBHOOK_URL"
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/*"
+            ]
+        }
+        ,
+        {
+            "Sid": "AllowLambdaManagementForTestingAndRefresh",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:InvokeFunction",
+                "lambda:UpdateFunctionConfiguration",
+                "lambda:GetFunctionConfiguration",
+                "lambda:UpdateFunctionCode"
+            ],
+            "Resource": [
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<EXECUTOR_LAMBDA_NAME>",
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<WORKER_LAMBDA_NAME>",
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<NOTIFIER_LAMBDA_NAME>",
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<INTERACTOR_LAMBDA_NAME>"
+            ]
+        }
+        ,
+        {
+            "Sid": "AllowLambdaLayerManagement",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:PublishLayerVersion",
+                "lambda:ListLayerVersions",
+                "lambda:DeleteLayerVersion",
+                "lambda:GetLayerVersion"
+            ],
+            "Resource": "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:layer:*"
+        }
+        ,
+        {
+            "Sid": "AllowIAMPolicyManagement",
+            "Effect": "Allow",
+            "Action": [
+                "iam:GetPolicy",
+                "iam:GetPolicyVersion",
+                "iam:ListPolicyVersions",
+                "iam:CreatePolicyVersion",
+                "iam:DeletePolicyVersion"
+            ],
+            "Resource": [
+                "arn:aws:iam::<ACCOUNT_ID>:policy/<INTERACT_POLICY_NAME>",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/<EXECUTE_POLICY_NAME>",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/<NOTIFY_POLICY_NAME>",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/<SERVER_POLICY_NAME>",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/<REGIST_POLICY_NAME>",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/<WORK_POLICY_NAME>"
             ]
         }
     ]

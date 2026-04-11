@@ -58,7 +58,21 @@ Phase 4: セーブデータ管理と自動バックアップ (S3 Files 連携)
 
 [x] /restore コマンドの実装: S3バージョニングを利用した過去データのリスト表示と復元機能
 
-[ ] Pull Request 作成 & develop へマージ
+[x] Pull Request 作成 & develop へマージ
+
+Phase 4.5: アーキテクチャの最適化とセキュリティ強化
+[x] Factorio_Notifier の新規作成と責務の委譲
+
+[x] 非同期通知フローへの移行 (初期応答の PATCH 更新と Followup POST の使い分け)
+
+[x] 権限バリデーションの実装 (ADMIN_USER_IDS/ROLE_IDS 照合および Discord UI 制限)
+
+[x] エラーハンドリング（404/400リトライ、文字数制限切り詰め、同期状態表示）の共通化
+
+Phase 4.8: 運用安定化と自動テスト
+[x] 共通レイヤー (factorio_common) の導入と設定取得の一括化 (GetParametersByPath)
+[x] test_runner.py の開発: モックデータを用いた全 Lambda 関数の統合テスト実装
+[x] ログチャットへの自動テストレポート送信機能の実装
 
 Phase 5: AIプレイヤー連携
 [ ] feature/ai-player-integration ブランチの作成
