@@ -2,6 +2,8 @@ import subprocess
 import sys
 import os
 import argparse
+from dotenv import dotenv_values
+import boto3
 
 def run_script(script_path, env):
     """ヘルパースクリプトを実行する"""
@@ -12,8 +14,13 @@ def run_script(script_path, env):
     # Pythonインタープリタのパスを取得
     python_exe = sys.executable
     
+    # setup_config.py が実行されたことを子プロセスに伝えるフラグ
+    current_env = os.environ.copy()
+    if script_path == "scripts/setup_config.py":
+        os.environ['SETUP_CONFIG_DONE'] = '1'
+
     try:
-        result = subprocess.run([python_exe, script_path, env], check=True)
+        result = subprocess.run([python_exe, script_path, env], check=True, env=os.environ)
         return True
     except subprocess.CalledProcessError as e:
         print(f"❌ Error during execution of {script_path}: {e}")
@@ -48,6 +55,45 @@ def is_dirty():
     except Exception:
         return False
 
+def show_deployment_summary(env, project_root):
+    """デプロイ後のリソースサマリーを表示する"""
+    env_file = ".env" if env == "prod" else f".env.{env}"
+    env_path = os.path.join(project_root, env_file)
+    if not os.path.exists(env_path): return
+
+    conf = dotenv_values(env_path)
+    region = conf.get('AWS_REGION', 'ap-northeast-1')
+    lambdas = [
+        conf.get('INTERACTOR_LAMBDA_NAME', 'Factorio_Interactor'),
+        conf.get('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'),
+        conf.get('WORKER_LAMBDA_NAME', 'Factorio_Worker'),
+        conf.get('NOTIFIER_LAMBDA_NAME', 'Factorio_Notifier')
+    ]
+
+    print(f"\n{'='*65}")
+    print(f"📊 Deployment Summary [{env.upper()}]")
+    print(f"{'='*65}")
+    print(f"{'Lambda Function':<25} | {'Memory':<8} | {'Timeout':<8} | {'Last Modified':<20} | {'Description'}")
+    print(f"{'-'*25}-|-{'-'*8}-|-{'-'*8}-|{'-'*20}-|{'-'*30}")
+
+    try:
+        session = boto3.Session(profile_name=conf.get('AWS_PROFILE'))
+        client = session.client('lambda', region_name=region)
+        
+        for name in lambdas:
+            if not name: continue
+            try:
+                r = client.get_function_configuration(FunctionName=name)
+                mem = f"{r['MemorySize']}MB"
+                tm = f"{r['Timeout']}s"
+                mod = r['LastModified'].split('.')[0].replace('T', ' ')
+                desc = r.get('Description', '-')
+                print(f"{name:<25} | {mem:<8} | {tm:<8} | {mod:<20} | {desc}")
+            except:
+                print(f"{name:<25} | {'N/A':<8} | {'N/A':<8} | {'Not Found':<20} | -")
+    except Exception as e:
+        print(f"ℹ️  Could not generate summary: {e}")
+
 def main():
     # スクリプトの場所を基準にプロジェクトルートへ移動
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -61,10 +107,11 @@ def main():
     all_scripts = [
         ("config", "scripts/setup_config.py"),
         ("policies", "scripts/deploy_policies.py"),
+        ("init", "scripts/init_aws_resources.py"),
         ("layer", "scripts/update_layer.py"),
         ("lambda", "scripts/deploy_lambda.py"),
         ("register", "scripts/register.py"),
-        ("schedule", "scripts/update_schedule.py"),
+        ("eventbridge", "scripts/update_eventbridge.py"),
         ("test", "scripts/test_runner.py")
     ]
     valid_steps = [name for name, _ in all_scripts]
@@ -202,6 +249,9 @@ def main():
                 f.write(current_commit)
         except Exception as e:
             print(f"⚠️  Could not write success marker: {e}")
+
+    # 4. サマリー表示
+    show_deployment_summary(env, project_root)
 
     print(f"\n🎉 Full Deployment for [{env}] completed successfully!")
 

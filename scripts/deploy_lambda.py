@@ -7,6 +7,7 @@ import base64
 import subprocess
 from dotenv import load_dotenv
 import sys
+from datetime import datetime
 
 def get_git_revision():
     """Gitのコミットハッシュを取得"""
@@ -30,9 +31,43 @@ def get_git_branch():
     except:
         return "unknown"
 
+def cleanup_old_lambda_versions(client, function_name, keep=3):
+    """古い関数のバージョンを削除（$LATESTは除外）"""
+    try:
+        versions = []
+        paginator = client.get_paginator('list_versions_by_function')
+        for page in paginator.paginate(FunctionName=function_name):
+            versions.extend(page['Versions'])
+
+        # 数値バージョンのみ抽出して降順（新しい順）にソート
+        numeric_versions = [v['Version'] for v in versions if v['Version'] != '$LATEST']
+        numeric_versions.sort(key=lambda x: int(x), reverse=True)
+
+        if len(numeric_versions) > keep:
+            for v_num in numeric_versions[keep:]:
+                print(f"  🗑️  Deleting old function version: {function_name} v{v_num}")
+                client.delete_function(FunctionName=function_name, Qualifier=v_num)
+    except Exception as e:
+        print(f"  ⚠️  Failed to cleanup old versions for {function_name}: {e}")
+
+def update_lambda_alias(client, function_name, version, alias_name="LIVE"):
+    """エイリアスを作成または更新して特定のバージョンを指すようにする"""
+    try:
+        # エイリアスの存在確認
+        client.get_alias(FunctionName=function_name, Name=alias_name)
+        # 存在すれば更新
+        client.update_alias(FunctionName=function_name, Name=alias_name, FunctionVersion=version)
+        print(f"  🚩 Alias '{alias_name}' updated to version {version}")
+    except client.exceptions.ResourceNotFoundException:
+        # 存在しなければ作成
+        client.create_alias(FunctionName=function_name, Name=alias_name, FunctionVersion=version, 
+                            Description=f"Points to the latest stable deployment")
+        print(f"  🚩 Alias '{alias_name}' created pointing to version {version}")
+
 def deploy_lambda_functions():
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    has_error = False
 
     # 環境選択
     env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
@@ -60,8 +95,8 @@ def deploy_lambda_functions():
             print("🛑 Deployment cancelled.")
             sys.exit(1)
 
-        # 本番環境（引数なし）の場合のみ、さらなる確認を求める
-        if not env_arg:
+        # 本番環境の場合のみ、さらなる確認を求める
+        if env_arg == "prod":
             print("\n🚨 ATTENTION: You are about to deploy to the PRODUCTION environment.")
             print("This will overwrite the live Lambda functions used in the main environment.")
             prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
@@ -87,10 +122,8 @@ def deploy_lambda_functions():
 
         # lambda_function.py のパス
         func_dir = os.path.join(BASE_DIR, "aws", "Lambda", item["dir"])
-        file_path = os.path.join(func_dir, "lambda_function.py")
-
-        if not os.path.exists(file_path):
-            print(f"⚠️  Skipping {function_name}: {file_path} not found.")
+        if not os.path.exists(func_dir):
+            print(f"⚠️  Skipping {function_name}: {func_dir} not found.")
             continue
 
         print(f"📦 Packaging and deploying {function_name}...")
@@ -98,17 +131,38 @@ def deploy_lambda_functions():
         try:
             # 前のステップ（Layer更新等）による競合を避けるために待機
             wait_for_lambda_ready(lambda_client, function_name)
-
-            with open(file_path, "rb") as f:
-                file_content = f.read()
-
+            
             # メモリ内でZIPファイルを作成
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                # タイムスタンプを固定してハッシュの同一性を確保
-                info = zipfile.ZipInfo("lambda_function.py")
-                info.date_time = (2026, 4, 11, 0, 0, 0)
-                zf.writestr(info, file_content)
+                all_files = []
+                exclude_dirs = {'__pycache__', '.pytest_cache'}
+                exclude_files = {'.DS_Store', 'archive.zip'}
+
+                for root, dirs, files in os.walk(func_dir):
+                    # 不要なディレクトリをスキップ
+                    dirs[:] = [d for d in dirs if d not in exclude_dirs]
+                    for file in files:
+                        if file not in exclude_files and not file.endswith(('.pyc', '.pyo')):
+                            all_files.append(os.path.join(root, file))
+                
+                # ファイルリストをソートして順序を固定
+                all_files.sort()
+
+                for full_path in all_files:
+                    # ZIP内の相対パスを取得し、Windows環境でもスラッシュに統一
+                    rel_path = os.path.relpath(full_path, func_dir).replace('\\', '/')
+                    with open(full_path, "rb") as f:
+                        file_content = f.read()
+                    
+                    # タイムスタンプを固定してハッシュの同一性を確保
+                    info = zipfile.ZipInfo(rel_path)
+                    info.date_time = (2026, 4, 11, 0, 0, 0)
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.create_system = 3  # Unix
+                    # パーミッションを固定 (Unix 644相当)
+                    info.external_attr = 0o644 << 16
+                    zf.writestr(info, file_content)
             
             zip_content = zip_buffer.getvalue()
             
@@ -121,9 +175,10 @@ def deploy_lambda_functions():
                 continue
 
             # 説明文に Git リビジョンを記録
+            deploy_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             lambda_client.update_function_configuration(
                 FunctionName=function_name,
-                Description=f"Deployed from Git: {git_rev} at 2026-04-11"
+                Description=f"Deployed from Git: {git_rev} at {deploy_time}"
             )
 
             # 説明文更新の完了を待機 (コード更新との競合防止)
@@ -135,13 +190,24 @@ def deploy_lambda_functions():
                 ZipFile=zip_content,
                 Publish=True  # 新しいバージョンを発行
             )
+            
+            new_version = response.get('Version')
+            print(f"✅ Successfully deployed {function_name} (Version: {new_version})")
 
-            print(f"✅ Successfully deployed {function_name} (Version: {response.get('Version')})")
+            # エイリアスを最新バージョンに更新
+            update_lambda_alias(lambda_client, function_name, new_version)
+
+            # デプロイ成功後に古いバージョンをクリーンアップ
+            cleanup_old_lambda_versions(lambda_client, function_name)
 
         except Exception as e:
             print(f"❌ Failed to deploy {function_name}: {e}")
+            has_error = True
 
     print("\n--- Deployment process finished ---")
+    if has_error:
+        print("❌ One or more Lambda deployments failed.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     # スクリプトの場所を基準にプロジェクトルートを取得

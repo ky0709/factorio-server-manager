@@ -9,19 +9,28 @@ ssm = boto3.client('ssm')
 # Webhook URL のキャッシュ用
 _url_cache = {}
 
-def get_webhook_url(path='/factorio/DISCORD_WEBHOOK_URL'):
+def get_webhook_url(key='DISCORD_WEBHOOK_URL'):
     """SSM Parameter StoreからWebhook URLを取得"""
+    # 環境変数からベースパスを取得。末尾のスラッシュを考慮
+    base_path = os.environ.get('SSM_PARAMETER_PATH', '/factorio/')
+    if not base_path.endswith('/'): base_path += '/'
+    
+    path = f"{base_path}{key}"
+
     if path in _url_cache:
         return _url_cache[path]
 
-    response = ssm.get_parameter(
-        Name=path,
-        WithDecryption=True
-    )
-    # 引用符や空白が混入していても正常に動作するようにクレンジング
-    url = response['Parameter']['Value'].strip("'\" ")
-    _url_cache[path] = url
-    return url
+    try:
+        response = ssm.get_parameter(
+            Name=path,
+            WithDecryption=True
+        )
+        url = response['Parameter']['Value'].strip("'\" ")
+        _url_cache[path] = url
+        return url
+    except Exception as e:
+        print(f"❌ Error fetching SSM parameter {path}: {e}")
+        return None
 
 def post_to_discord(url, payload, method='POST'):
     """Discord APIにリクエストを送信"""
@@ -113,14 +122,14 @@ def lambda_handler(event, context):
         post_to_discord(url, payload, method='PATCH')
         
     elif mode == 'webhook':
-        url = get_webhook_url()
-        post_to_discord(url, payload, method='POST')
+        url = get_webhook_url('DISCORD_WEBHOOK_URL') or os.getenv('DISCORD_WEBHOOK_URL')
+        if url: post_to_discord(url, payload, method='POST') # SSMがダメなら環境変数も試す
         
     elif mode == 'log':
-        # カンマ区切りで複数のURLが登録されている可能性を考慮
-        urls_raw = get_webhook_url('/factorio/DISCORD_LOG_WEBHOOK_URL')
-        urls = [u.strip() for u in urls_raw.split(',') if u.strip()]
-        for url in urls:
-            post_to_discord(url, payload, method='POST')
+        urls_raw = get_webhook_url('DISCORD_LOG_WEBHOOK_URL')
+        if urls_raw:
+            urls = [u.strip() for u in urls_raw.split(',') if u.strip()]
+            for url in urls:
+                post_to_discord(url, payload, method='POST')
 
     return {"status": "ok"}

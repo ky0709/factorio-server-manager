@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -12,21 +13,39 @@ def get_msg(category, key, locale='ja', **kwargs):
 COLOR_GREEN, COLOR_BLUE = 0x2ECC71, 0x3498DB
 
 config = {"initialized": False}
+factorio_state_table = None
 
 def init_config():
-    ssm_config = fetch_config_from_ssm()
-    config.update(ssm_config)
-    global factorio_state_table
-    factorio_state_table = get_client('dynamodb', True).Table(config.get('dynamodb_table_name'))
-    config["initialized"] = True
+    try:
+        ssm_config = fetch_config_from_ssm()
+        if not ssm_config:
+            print(f"⚠️ Warning: No config found in SSM. Check SSM_PARAMETER_PATH: {os.getenv('SSM_PARAMETER_PATH')}")
+            return
+
+        config.update(ssm_config)
+        
+        table_name = config.get('dynamodb_table_name')
+        if table_name:
+            global factorio_state_table
+            factorio_state_table = get_client('dynamodb', True).Table(table_name)
+
+        config["initialized"] = True
+    except Exception as e:
+        print(f"❌ Failed to initialize config: {e}")
 
 def notify(content, mode='followup', event=None, embeds=None, components=None):
     # テストモード時は Discord への通知処理をスキップ
+    notifier_name = config.get('notifier_lambda_name')
     if config.get("test_mode"):
         print(f"DEBUG: [Test Mode] Notification suppressed: {content}")
         return
+
+    if not notifier_name:
+        print(f"⚠️ Cannot notify: notifier_lambda_name is missing. Content: {content}")
+        return
+
     notify_via_lambda(
-        config['notifier_lambda_name'],
+        notifier_name,
         content,
         mode=mode,
         event=event,
@@ -101,7 +120,7 @@ def handle_status(event, ec2, inst, state, ip, locale):
 
             # --- ベストプラクティス: カタログの自動更新 (副作用) ---
             # S3の方が新しい場合のみカタログを更新。この失敗は表示を妨げてはならない。
-            if not db_timestamp or s3_dt.isoformat() > db_timestamp:
+            if not config.get("test_mode") and (not db_timestamp or s3_dt.isoformat() > db_timestamp):
                 try:
                     factorio_state_table.update_item(
                         Key={'ConfigKey': 'LatestSaveInfo'},
@@ -199,16 +218,20 @@ def handle_stop(event, ec2, inst, state, ip, locale):
                 ExpressionAttributeValues={':val': str(start_stop_time)}
             )
 
-            # 1. セーブの実行 (RCON)
-            run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
-            
-            # カタログ (DynamoDB) を更新
-            factorio_state_table.update_item(
-                Key={'ConfigKey': 'LatestSaveInfo'},
-                UpdateExpression="set #ts = :val",
-                ExpressionAttributeNames={'#ts': 'Timestamp'},
-                ExpressionAttributeValues={':val': datetime.now(JST).isoformat()}
-            )
+            # テストモード以外の場合のみ、実際のセーブ処理を実行
+            if not config.get("test_mode"):
+                # 1. セーブの実行 (RCON)
+                run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
+                
+                # カタログ (DynamoDB) を更新
+                factorio_state_table.update_item(
+                    Key={'ConfigKey': 'LatestSaveInfo'},
+                    UpdateExpression="set #ts = :val",
+                    ExpressionAttributeNames={'#ts': 'Timestamp'},
+                    ExpressionAttributeValues={':val': datetime.now(JST).isoformat()}
+                )
+            else:
+                print("DEBUG: [Test Mode] Skipping RCON save and catalog update in stop sequence.")
 
             # 2. Factorioサーバー停止 & アンマウント準備 (SSM)
             ssm = get_client('ssm')
@@ -236,14 +259,19 @@ def handle_stop(event, ec2, inst, state, ip, locale):
 
 def handle_save(event, ec2, inst, state, ip, locale):
         if state != 'running': return get_msg("common", "server_offline", locale)
-        run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
-        # カタログ (DynamoDB) を更新
-        factorio_state_table.update_item(
-            Key={'ConfigKey': 'LatestSaveInfo'},
-            UpdateExpression="set #ts = :val",
-            ExpressionAttributeNames={'#ts': 'Timestamp'},
-            ExpressionAttributeValues={':val': datetime.now(JST).isoformat()}
-        )
+        
+        # テストモード以外の場合のみ、実際のセーブ処理を実行
+        if not config.get("test_mode"):
+            run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
+            # カタログ (DynamoDB) を更新
+            factorio_state_table.update_item(
+                Key={'ConfigKey': 'LatestSaveInfo'},
+                UpdateExpression="set #ts = :val",
+                ExpressionAttributeNames={'#ts': 'Timestamp'},
+                ExpressionAttributeValues={':val': datetime.now(JST).isoformat()}
+            )
+        else:
+            print("DEBUG: [Test Mode] Skipping RCON save and catalog update.")
         return get_msg("save", "success", locale)
 
 def handle_pass(event, ec2, inst, state, ip, locale):
@@ -285,10 +313,18 @@ def execute_ec2_command(action, event):
 def lambda_handler(event, context):
     if not config["initialized"]: init_config()
 
+    # 診断用ログ: EventBridge からの呼び出しを含め、すべてのイベントを CloudWatch に記録
+    print(f"DEBUG: Received Event: {json.dumps(event)}")
+
+    # invocation ごとに test_mode をリセット（ステート汚染防止）
+    action = event.get('action')
+    test_mode = event.get('test_mode', False)
+    config["test_mode"] = test_mode
+
     # EventBridge からの EC2 状態変更通知の処理
     if event.get('source') == 'aws.ec2' and event.get('detail-type') == 'EC2 Instance State-change Notification':
         detail = event.get('detail', {})
-        instance_id = detail.get('instance-id', '')
+        instance_id = detail.get('instance-id') or detail.get('instanceId') or ''
         
         # state が辞書形式 {'name': 'stopped'} か、文字列 "stopped" かを判定して取得
         raw_state = detail.get('state')
@@ -301,42 +337,50 @@ def lambda_handler(event, context):
         print(f"DEBUG: Received EC2 event for {instance_id} state={state_name}. Expected ID={config.get('instance_id')}")
 
         # インスタンスIDの比較 (常に正規化して比較)
-        if instance_id and instance_id.strip("'\" ") == str(config.get("instance_id", "")).strip("'\" "):
-            if state_name == 'stopped':
-                # 停止開始時刻を DynamoDB から取得して経過時間を算出
-                res = factorio_state_table.get_item(Key={'ConfigKey': 'StopStartTime'})
-                start_time_str = res.get('Item', {}).get('Timestamp')
-                
-                elapsed_msg = ""
-                if start_time_str:
-                    elapsed = int(time.time() - float(start_time_str))
-                    elapsed_msg = f" (Total sequence time: {elapsed}s)"
-                
-                notify(f"🔌 [LOG] EC2 Instance ({instance_id}) has stopped. Shutdown sequence completed.{elapsed_msg}", mode='log')
-                factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
-                return {"status": "ok"}
-            elif state_name == 'running':
-                # 起動開始時刻を DynamoDB から取得して経過時間を算出
-                res = factorio_state_table.get_item(Key={'ConfigKey': 'StartStartTime'})
-                start_time_str = res.get('Item', {}).get('Timestamp')
-                
-                elapsed_msg = ""
-                if start_time_str:
-                    elapsed = int(time.time() - float(start_time_str))
-                    elapsed_msg = f" (EC2 boot time: {elapsed}s)"
-                
-                notify(f"🚀 [LOG] EC2 Instance ({instance_id}) is now running.{elapsed_msg}", mode='log')
-                factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
-                return {"status": "ok"}
+        local_id = str(config.get("instance_id") or "").strip().strip("'\"").lower()
+        remote_id = str(instance_id or "").strip().strip("'\"").lower()
+
+        if not local_id:
+            print(f"⚠️ Event ignored: local_id (instance_id) is empty. SSM path: {os.getenv('SSM_PARAMETER_PATH', '/factorio/')} (Config keys: {list(config.keys())})")
+        elif not factorio_state_table:
+            print("❌ Event ignored: factorio_state_table is not initialized. Skipping DB operations.")
+        elif remote_id != local_id:
+            print(f"ℹ️ Event ignored: ID mismatch. Remote={remote_id}, Local={local_id}")
+        else:
+            try:
+                if state_name == 'stopped':
+                    # 停止開始時刻を DynamoDB から取得して経過時間を算出
+                    res = factorio_state_table.get_item(Key={'ConfigKey': 'StopStartTime'})
+                    start_time_str = res.get('Item', {}).get('Timestamp')
+                    
+                    elapsed_msg = ""
+                    if start_time_str:
+                        elapsed = int(time.time() - float(start_time_str))
+                        elapsed_msg = f" (Total sequence time: {elapsed}s)"
+                    
+                    notify(f"🔌 [LOG] EC2 Instance ({instance_id}) has stopped. Shutdown sequence completed.{elapsed_msg}", mode='log')
+                    factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
+                    return {"status": "ok"}
+                elif state_name == 'running':
+                    # 起動開始時刻を DynamoDB から取得して経過時間を算出
+                    res = factorio_state_table.get_item(Key={'ConfigKey': 'StartStartTime'})
+                    start_time_str = res.get('Item', {}).get('Timestamp')
+                    
+                    elapsed_msg = ""
+                    if start_time_str:
+                        elapsed = int(time.time() - float(start_time_str))
+                        elapsed_msg = f" (EC2 boot time: {elapsed}s)"
+                    
+                    notify(f"🚀 [LOG] EC2 Instance ({instance_id}) is now running.{elapsed_msg}", mode='log')
+                    factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
+                    return {"status": "ok"}
+            except Exception as e:
+                print(f"❌ Error processing EC2 state change: {e}")
         
         # イベント対象外であっても、EventBridgeイベントであるならここで終了させる
         return {"status": "event_handled_or_ignored"}
 
-    action = event.get('action')
     locale = event.get('locale', 'ja')
-    test_mode = event.get('test_mode', False)
-    config["test_mode"] = test_mode # notify ラッパーで参照するために保存
-
     # 更新(PATCH)対象の判定
     notify_mode = 'patch' if action in ['status', 'pass', 'license'] else 'followup'
     

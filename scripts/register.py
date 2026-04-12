@@ -28,8 +28,8 @@ if os.getenv('AUTO_CONFIRM') != '1':
         print("🛑 Operation cancelled.")
         sys.exit(1)
 
-    # 本番環境（引数なし）の場合のみ、さらなる確認を求める
-    if not env_arg:
+    # 本番環境の場合のみ、さらなる確認を求める
+    if env_arg == "prod":
         print("\n🚨 ATTENTION: You are about to sync secrets to the PRODUCTION SSM Parameter Store.")
         prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
         if prod_confirm != 'DEPLOY-PROD':

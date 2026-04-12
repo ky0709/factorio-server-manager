@@ -38,12 +38,12 @@ def update_lambda_layer():
             print("🛑 Operation cancelled.")
             sys.exit(1)
 
-        # 本番環境（引数なし）の場合のみ、さらなる確認を求める
-        if not env_arg:
+        # 本番環境の場合のみ、さらなる確認を求める
+        if env_arg == "prod":
             print("\n🚨 ATTENTION: You are about to update the PRODUCTION Lambda Layer.")
-            prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
-            if prod_confirm != 'DEPLOY-PROD':
-                print("🛑 Production update aborted.")
+            prod_confirm = input("To proceed, please type 'UPDATE-PROD': ")
+            if prod_confirm != 'UPDATE-PROD':
+                print("🛑 Production update cancelled.")
                 sys.exit(1)
 
     print("\n--- Packaging and Uploading Lambda Layer ---")
@@ -52,20 +52,36 @@ def update_lambda_layer():
     # 1. メモリ内でZIPファイルを作成
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # ファイルリストを収集
+        all_files = []
+        exclude_dirs = {'__pycache__', '.pytest_cache', '.git'}
+        exclude_files = {'.DS_Store', 'desktop.ini'}
+
         root_path = os.path.join(layer_dir, 'python')
-        for root, _, files in os.walk(root_path):
+        for root, dirs, files in os.walk(root_path):
+            # 不要なディレクトリをスキップ
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
             for file in files:
-                full_path = os.path.join(root, file)
-                # ZIP内のパスを "python/..." に調整
-                rel_path = os.path.relpath(full_path, layer_dir)
-                
-                with open(full_path, 'rb') as f:
-                    file_data = f.read()
-                
-                # タイムスタンプを固定してハッシュの同一性を確保
-                info = zipfile.ZipInfo(rel_path)
-                info.date_time = (2026, 4, 11, 0, 0, 0)
-                zf.writestr(info, file_data)
+                if file not in exclude_files and not file.endswith(('.pyc', '.pyo')):
+                    all_files.append(os.path.join(root, file))
+        
+        # パスでソートして順序を固定 (決定論的なZIP作成のため)
+        all_files.sort()
+
+        for full_path in all_files:
+            # ZIP内のパスを "python/..." に調整
+            rel_path = os.path.relpath(full_path, layer_dir).replace('\\', '/')
+            with open(full_path, 'rb') as f:
+                file_data = f.read()
+            
+            # タイムスタンプを固定してハッシュの同一性を確保
+            info = zipfile.ZipInfo(rel_path)
+            info.date_time = (2026, 4, 11, 0, 0, 0)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3  # Unix
+            # パーミッションを固定 (Unix 644相当)
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, file_data)
     
     zip_content = zip_buffer.getvalue()
     print("📦 Packaged Layer in memory.")
@@ -79,8 +95,13 @@ def update_lambda_layer():
         all_versions = lambda_client.list_layer_versions(LayerName=layer_name).get('LayerVersions', [])
         
         if all_versions:
-            latest_v = all_versions[0] # list_layer_versions は最新順に返却される
-            if latest_v.get('ContentCodeSha256') == local_sha256:
+            latest_v_summary = all_versions[0] # list_layer_versions は最新順に返却される
+            # list_layer_versions の結果にはハッシュが含まれないため、詳細を取得する
+            latest_v = lambda_client.get_layer_version(
+                LayerName=layer_name,
+                VersionNumber=latest_v_summary['Version']
+            )
+            if latest_v.get('Content', {}).get('CodeSha256') == local_sha256:
                 print(f"✨ Skipping Layer update: No changes detected (Version {latest_v['Version']} is up to date).")
                 return
 

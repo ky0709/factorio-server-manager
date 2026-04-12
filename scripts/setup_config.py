@@ -30,12 +30,18 @@ def setup_configs():
         'WORKER_LAMBDA_NAME': "<WORKER_LAMBDA_NAME>",
         'NOTIFIER_LAMBDA_NAME': "<NOTIFIER_LAMBDA_NAME>",
         'INTERACTOR_LAMBDA_NAME': "<INTERACTOR_LAMBDA_NAME>",
+        'INTERACTOR_ROLE_NAME': "<INTERACTOR_ROLE_NAME>",
+        'EXECUTOR_ROLE_NAME': "<EXECUTOR_ROLE_NAME>",
+        'WORKER_ROLE_NAME': "<WORKER_ROLE_NAME>",
+        'NOTIFIER_ROLE_NAME': "<NOTIFIER_ROLE_NAME>",
+        'EVENTBRIDGE_ROLE_NAME': "<EVENTBRIDGE_ROLE_NAME>",
         'INTERACT_POLICY_NAME': "<INTERACT_POLICY_NAME>",
         'EXECUTE_POLICY_NAME': "<EXECUTE_POLICY_NAME>",
         'NOTIFY_POLICY_NAME': "<NOTIFY_POLICY_NAME>",
         'SERVER_POLICY_NAME': "<SERVER_POLICY_NAME>",
         'REGIST_POLICY_NAME': "<REGIST_POLICY_NAME>",
         'WORK_POLICY_NAME': "<WORK_POLICY_NAME>",
+        'EVENTBRIDGE_POLICY_NAME': "<EVENTBRIDGE_POLICY_NAME>",
     }
 
     replacements = {}
@@ -65,7 +71,10 @@ def setup_configs():
         os.path.join(BASE_DIR, "aws/IAM/FactorioNotifyPolicy/policy.json"),
         os.path.join(BASE_DIR, "aws/IAM/FactorioServerPolicy/policy.json"),
         os.path.join(BASE_DIR, "aws/IAM/FactorioRegistPolicy/policy.json"),
-        os.path.join(BASE_DIR, "aws/IAM/FactorioWorkPolicy/policy.json")
+        os.path.join(BASE_DIR, "aws/IAM/FactorioWorkPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioEventBridgePolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioLambdaRole/trust_policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioEventBridgeRole/trust_policy.json")
     ]
 
     print("--- Generating IAM Policies from Templates ---")

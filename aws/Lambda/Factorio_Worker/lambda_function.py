@@ -18,6 +18,8 @@ TEXT_RESOURCES = {
             "ja": "⏳ (S3同期中...) ",
             "en": "⏳ (S3 Syncing...) "
         },
+        "auto_shutdown": {"ja": "⌛ {duration}分無人状態が続いたため、サーバーを停止します。", "en": "⌛ Stopping server due to {duration} minutes of inactivity."},
+        "rcon_unresponsive": {"ja": "⚠️ [LOG] RCONが無応答です。サーバーを再起動します...", "en": "⚠️ [LOG] RCON is unresponsive. Restarting server..."},
         "truncated": {"ja": "\n... (履歴が多いため、一部を省略しました)", "en": "\n... (Some items were omitted due to length limits)"}
     }
 }
@@ -156,7 +158,7 @@ def handle_restore(event):
              return get_msg("restore", "failed", locale, err="Version ID is required."), None
 
         try:
-            if event.get('test_mode'):
+            if config.get('test_mode'):
                 print(f"DEBUG: [Test Mode] Skipping actual S3 copy for version {vid}")
                 return get_msg("restore", "complete", locale, date="TEST_DATE", id=vid), None
 
@@ -184,6 +186,7 @@ def handle_restore(event):
 def handle_auto_check(event):
     test_mode = event.get('test_mode', False)
     mock = event.get('mock_data', {}) # テスト用の擬似データ
+    locale = event.get('locale', 'ja')
     
     ec2 = get_client('ec2')
     inst = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
@@ -201,7 +204,7 @@ def handle_auto_check(event):
         off_count = mock.get('offline_count', factorio_state_table.get_item(Key={'ConfigKey': 'OfflineCount'}).get('Item', {}).get('CountValue', 0)) + 1
         if off_count >= int(config.get('rcon_unresponsive_threshold', 2)):
             if test_mode: return {"action": "restart_triggered", "reason": "RCON unresponsive"}
-            notify("⚠️ [LOG] Unresponsive. Restarting...", mode='log')
+            notify(get_msg("restore", "rcon_unresponsive", locale), mode='log')
             get_client('ssm').send_command(InstanceIds=[config['instance_id']], DocumentName="AWS-RunShellScript", Parameters={'commands': ["sudo systemctl restart factorio"]})
             off_count = 0
         if test_mode: return {"action": "count_offline", "current": off_count}
@@ -222,7 +225,7 @@ def handle_auto_check(event):
                 notify(log_msg, mode='log')
                 
                 get_client('lambda').invoke(FunctionName=config['executor_lambda_name'], InvocationType='Event', Payload=json.dumps({'action': 'stop'}))
-                notify("⌛ Auto-shutdown initiated.", mode='webhook')
+                notify(get_msg("restore", "auto_shutdown", locale, duration=duration_mins), mode='webhook')
                 z_count = 0
             if test_mode: return {"action": "count_zero_players", "current": z_count}
             factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': z_count})
@@ -234,9 +237,11 @@ def handle_auto_check(event):
 
 def lambda_handler(event, context):
     if not config["initialized"]: init_config()
+
+    # invocation ごとに test_mode をリセット（ステート汚染防止）
     action = event.get('action')
-    test_mode = event.get('test_mode', False) # Add test_mode flag
-    config["test_mode"] = test_mode # notify ラッパーで参照するために保存
+    test_mode = event.get('test_mode', False)
+    config["test_mode"] = test_mode
 
     # データの安全な取得
     data_options = event.get('data', {}).get('options', [])

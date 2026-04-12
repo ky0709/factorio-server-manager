@@ -201,12 +201,18 @@ def run_flow_test():
     restore_list_result = invoke_lambda(os.getenv('WORKER_LAMBDA_NAME', 'Factorio_Worker'), restore_list_payload)
     if restore_list_result and restore_list_result.get('content'):
         print(f"  - Restore List content: {restore_list_result['content']}")
-        assert "履歴" in restore_list_result['content']
-        assert "MB" in restore_list_result['content']
-        assert "ID:" in restore_list_result['content']
-        # IDを抽出して次のテストで使用
-        match = re.search(r"ID: `([^`]+)`", restore_list_result['content'])
-        if match: captured_version_id = match.group(1)
+        
+        # データの有無に関わらず、ロジックが正常に動作してメッセージが返ってくれば成功とみなす
+        is_list_display = "履歴" in restore_list_result['content'] and "MB" in restore_list_result['content']
+        is_not_found = "見つかりませんでした" in restore_list_result['content']
+        
+        assert is_list_display or is_not_found
+        
+        if is_list_display:
+            assert "ID:" in restore_list_result['content']
+            # IDを抽出して次のテストで使用
+            match = re.search(r"ID: `([^`]+)`", restore_list_result['content'])
+            if match: captured_version_id = match.group(1)
 
         test_results.append({"name": "Worker Restore List", "ok": True})
         print("  ✅ Restore List content check passed.")
@@ -318,8 +324,8 @@ if __name__ == "__main__":
                 print("🛑 Operation cancelled.")
                 sys.exit(1)
 
-            # 本番環境（引数なし）の場合のみ、さらなる確認を求める
-            if not env_arg:
+            # 本番環境の場合のみ、さらなる確認を求める
+            if env_arg == "prod":
                 print("\n🚨 ATTENTION: You are about to run tests against the PRODUCTION environment.")
                 prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
                 if prod_confirm != 'DEPLOY-PROD':

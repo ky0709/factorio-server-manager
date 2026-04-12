@@ -34,6 +34,7 @@
             "Effect": "Allow",
             "Action": [
                 "ssm:PutParameter",
+                "ssm:GetParameter",
                 "ssm:GetParametersByPath",
                 "ssm:DeleteParameters"
             ],
@@ -50,14 +51,20 @@
                 "lambda:DeleteFunction",
                 "lambda:InvokeFunction",
                 "lambda:GetFunction",
+                "lambda:ListVersionsByFunction",
                 "lambda:UpdateFunctionConfiguration",
                 "lambda:GetFunctionConfiguration",
                 "lambda:UpdateFunctionCode",
                 "lambda:AddPermission",
-                "lambda:RemovePermission"
+                "lambda:RemovePermission",
+                "lambda:GetPolicy",
+                "lambda:GetAlias",
+                "lambda:CreateAlias",
+                "lambda:UpdateAlias",
+                "lambda:DeleteAlias"
             ],
             "Resource": [
-                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:Factorio*"
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:Factorio_*"
             ]
         }
         ,
@@ -87,6 +94,9 @@
                 "iam:GetRole",
                 "iam:CreateRole",
                 "iam:DeleteRole",
+                "iam:GetRolePolicy",
+                "iam:ListRolePolicies",
+                "iam:ListAttachedRolePolicies",
                 "iam:AttachRolePolicy",
                 "iam:DetachRolePolicy",
                 "iam:PutRolePolicy",
@@ -94,7 +104,10 @@
             ],
             "Resource": [
                 "arn:aws:iam::<ACCOUNT_ID>:policy/Factorio*",
-                "arn:aws:iam::<ACCOUNT_ID>:role/Factorio*"
+                "arn:aws:iam::<ACCOUNT_ID>:role/Factorio*",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/Amazon_EventBridge_Invoke_Lambda_*",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/Amazon-EventBridge-*",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/AWSLambdaBasicExecutionRole-*"
             ]
         },
         {
@@ -105,11 +118,13 @@
                 "events:DeleteRule",
                 "events:DescribeRule",
                 "events:PutTargets",
+                "events:ListTargetsByRule",
                 "events:RemoveTargets",
                 "scheduler:CreateSchedule",
                 "scheduler:DeleteSchedule",
                 "scheduler:GetSchedule",
-                "scheduler:UpdateSchedule"
+                "scheduler:UpdateSchedule",
+                "scheduler:ListSchedules"
             ],
             "Resource": [
                 "arn:aws:events:<REGION>:<ACCOUNT_ID>:rule/Factorio-*",
@@ -131,14 +146,18 @@
             "Effect": "Allow",
             "Action": "iam:PassRole",
             "Resource": [
-                "arn:aws:iam::<ACCOUNT_ID>:role/FactorioLambdaRole*",
-                "arn:aws:iam::<ACCOUNT_ID>:role/FactorioSchedulerRole*"
+                "arn:aws:iam::<ACCOUNT_ID>:role/<INTERACTOR_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<EXECUTOR_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<WORKER_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<NOTIFIER_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<EVENTBRIDGE_ROLE_NAME>*"
             ],
             "Condition": {
                 "StringEquals": {
                     "iam:PassedToService": [
                         "lambda.amazonaws.com",
-                        "scheduler.amazonaws.com"
+                        "scheduler.amazonaws.com",
+                        "events.amazonaws.com"
                     ]
                 }
             }

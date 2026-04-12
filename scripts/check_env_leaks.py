@@ -23,9 +23,9 @@ def check_env_leaks():
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    # 環境選択 (deploy_lambda.py と同じ仕様)
-    env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    env_file = f".env.{env_arg}" if env_arg else ".env"
+    # 環境選択 (デフォルト: prod)
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
+    env_file = ".env" if env_arg == "prod" else f".env.{env_arg}"
     env_path = os.path.join(BASE_DIR, env_file)
 
     if not os.path.exists(env_path):
@@ -62,7 +62,10 @@ def check_env_leaks():
         'EPHEMERAL_COMMAND_STRINGS', 'RESTRICTED_COMMAND_STRINGS', 'COMMAND_ROUTING',
         'S3_FILES_SYSTEM_ID', 'RCON_COMMAND_TIMEOUT_SECONDS', 'RCON_UNRESPONSIVE_THRESHOLD',
         'ZERO_PLAYER_THRESHOLD', 'S3_SYNC_WAIT_THRESHOLD_SECONDS', 
-        'RCON_READY_CHECK_INTERVAL_SECONDS', 'RCON_READY_CHECK_MAX_ATTEMPTS'
+        'RCON_READY_CHECK_INTERVAL_SECONDS', 'RCON_READY_CHECK_MAX_ATTEMPTS',
+        'AUTO_CHECK_SCHEDULE_NAME', 'DAILY_STOP_SCHEDULE_NAME', 'EC2_STATE_RULE_NAME',
+        'SSM_PARAMETER_PATH', 'AUTO_CHECK_SCHEDULE', 'DAILY_STOP_CRON', 
+        'AWS_PROFILE', 'AWS_ACCOUNT_ID', 'COMMON_LAYER_NAME'
     }
 
     # 3. 検索から除外する「Git内のパス」 (Git pathspec)
@@ -73,7 +76,8 @@ def check_env_leaks():
         ':!.env.example',    # .env.example を除外
         ':!docs/*',          # docs フォルダを除外
         ':!*.example',       # その他 .example ファイルを除外
-        ':!aws/IAM/*.json'   # 生成済みのポリシーファイルを除外
+        ':!aws/IAM/*.json',  # 生成済みのポリシーファイルを除外
+        ':!.deploy_state/*'  # デプロイ状態管理ファイルを除外
     ]
 
     # Windowsのコマンドライン文字数制限対策のため、コミットを分割して処理する
