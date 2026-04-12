@@ -2,10 +2,40 @@
     "Version": "2012-10-17",
     "Statement": [
         {
+            "Sid": "S3BucketManagement",
+            "Effect": "Allow",
+            "Action": [
+                "s3:CreateBucket",
+                "s3:PutBucketVersioning",
+                "s3:GetBucketLocation",
+                "s3:ListBucket",
+                "s3:DeleteBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::<S3_BUCKET_NAME>"
+            ]
+        },
+        {
+            "Sid": "DynamoDBTableManagement",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:CreateTable",
+                "dynamodb:DescribeTable",
+                "dynamodb:PutItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DeleteTable"
+            ],
+            "Resource": [
+                "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/<DYNAMODB_TABLE_NAME>"
+            ]
+        },
+        {
             "Sid": "SSMParameterControl",
             "Effect": "Allow",
             "Action": [
-                "ssm:PutParameter"
+                "ssm:PutParameter",
+                "ssm:GetParametersByPath",
+                "ssm:DeleteParameters"
             ],
             "Resource": [
                 "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/*"
@@ -16,10 +46,15 @@
             "Sid": "AllowLambdaManagementForTestingAndRefresh",
             "Effect": "Allow",
             "Action": [
+                "lambda:CreateFunction",
+                "lambda:DeleteFunction",
                 "lambda:InvokeFunction",
+                "lambda:GetFunction",
                 "lambda:UpdateFunctionConfiguration",
                 "lambda:GetFunctionConfiguration",
-                "lambda:UpdateFunctionCode"
+                "lambda:UpdateFunctionCode",
+                "lambda:AddPermission",
+                "lambda:RemovePermission"
             ],
             "Resource": [
                 "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<EXECUTOR_LAMBDA_NAME>",
@@ -42,14 +77,21 @@
         }
         ,
         {
-            "Sid": "AllowIAMPolicyManagement",
+            "Sid": "AllowIAMManagement",
             "Effect": "Allow",
             "Action": [
                 "iam:GetPolicy",
+                "iam:CreatePolicy",
+                "iam:DeletePolicy",
                 "iam:GetPolicyVersion",
                 "iam:ListPolicyVersions",
                 "iam:CreatePolicyVersion",
-                "iam:DeletePolicyVersion"
+                "iam:DeletePolicyVersion",
+                "iam:GetRole",
+                "iam:CreateRole",
+                "iam:DeleteRole",
+                "iam:AttachRolePolicy",
+                "iam:DetachRolePolicy"
             ],
             "Resource": [
                 "arn:aws:iam::<ACCOUNT_ID>:policy/<INTERACT_POLICY_NAME>",
@@ -57,8 +99,46 @@
                 "arn:aws:iam::<ACCOUNT_ID>:policy/<NOTIFY_POLICY_NAME>",
                 "arn:aws:iam::<ACCOUNT_ID>:policy/<SERVER_POLICY_NAME>",
                 "arn:aws:iam::<ACCOUNT_ID>:policy/<REGIST_POLICY_NAME>",
-                "arn:aws:iam::<ACCOUNT_ID>:policy/<WORK_POLICY_NAME>"
+                "arn:aws:iam::<ACCOUNT_ID>:policy/<WORK_POLICY_NAME>",
+                "arn:aws:iam::<ACCOUNT_ID>:role/FactorioLambdaRole*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/FactorioSchedulerRole*"
             ]
+        },
+        {
+            "Sid": "EventBridgeManagement",
+            "Effect": "Allow",
+            "Action": [
+                "events:PutRule",
+                "events:DeleteRule",
+                "events:DescribeRule",
+                "events:PutTargets",
+                "events:RemoveTargets",
+                "scheduler:CreateSchedule",
+                "scheduler:DeleteSchedule",
+                "scheduler:GetSchedule",
+                "scheduler:UpdateSchedule"
+            ],
+            "Resource": [
+                "arn:aws:events:<REGION>:<ACCOUNT_ID>:rule/Factorio-*",
+                "arn:aws:scheduler:<REGION>:<ACCOUNT_ID>:schedule/default/Factorio-*"
+            ]
+        },
+        {
+            "Sid": "IAMPassRole",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": [
+                "arn:aws:iam::<ACCOUNT_ID>:role/FactorioLambdaRole*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/FactorioSchedulerRole*"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": [
+                        "lambda.amazonaws.com",
+                        "scheduler.amazonaws.com"
+                    ]
+                }
+            }
         }
     ]
 }

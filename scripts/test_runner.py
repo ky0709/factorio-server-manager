@@ -2,11 +2,22 @@ import boto3
 import json
 import os
 from dotenv import load_dotenv
+import sys
 from datetime import datetime
 
 # プロジェクトルートの.envを読み込み
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+# 環境選択 (例: python test_runner.py dev)
+env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+env_file = f".env.{env_arg}" if env_arg else ".env"
+env_path = os.path.join(BASE_DIR, env_file)
+
+if os.path.exists(env_path):
+    print(f"📖 Loading environment: {env_file}")
+    load_dotenv(env_path)
+else:
+    load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 lambda_client = boto3.client('lambda', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
 
@@ -228,4 +239,19 @@ if __name__ == "__main__":
     if missing:
         print(f"❌ Missing .env variables: {', '.join(missing)}")
     else:
+        # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
+        if os.getenv('AUTO_CONFIRM') != '1':
+            confirm = input(f"Proceed with Integration Test for '{env_file if env_arg else '.env (PROD)'}'? (y/N): ")
+            if confirm.lower() != 'y':
+                print("🛑 Operation cancelled.")
+                sys.exit(1)
+
+            # 本番環境（引数なし）の場合のみ、さらなる確認を求める
+            if not env_arg:
+                print("\n🚨 ATTENTION: You are about to run tests against the PRODUCTION environment.")
+                prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
+                if prod_confirm != 'DEPLOY-PROD':
+                    print("🛑 Production test aborted.")
+                    sys.exit(1)
+
         run_flow_test()

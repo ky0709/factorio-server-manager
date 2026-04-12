@@ -28,7 +28,7 @@ def get_msg(category, key, locale='ja', **kwargs):
 config = {"initialized": False}
 
 def init_config():
-    ssm_config = fetch_config_from_ssm('/factorio/')
+    ssm_config = fetch_config_from_ssm()
     config.update(ssm_config)
     global factorio_state_table
     factorio_state_table = get_client('dynamodb', True).Table(config.get('dynamodb_table_name'))

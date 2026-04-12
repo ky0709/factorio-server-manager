@@ -63,7 +63,7 @@ def update_admin_config():
     """SSMから最新の管理者情報を取得してキャッシュを更新"""
     try:
         # レイヤーの共通関数を使用して一括取得 (高速)
-        params = fetch_config_from_ssm('/factorio/')
+        params = fetch_config_from_ssm()
         
         # 必須パラメータの存在確認
         required_keys = ['executor_lambda_name', 'worker_lambda_name', 'notifier_lambda_name']

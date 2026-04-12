@@ -4,14 +4,70 @@ import zipfile
 import io
 import hashlib
 import base64
+import subprocess
 from dotenv import load_dotenv
+import sys
+
+def get_git_revision():
+    """Gitのコミットハッシュを取得"""
+    try:
+        return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+    except:
+        return "unknown"
+
+def wait_for_lambda_ready(client, function_name):
+    """Lambda関数が更新可能な状態になるまで待機"""
+    try:
+        waiter = client.get_waiter('function_updated_v2')
+        waiter.wait(FunctionName=function_name, WaiterConfig={'Delay': 2, 'MaxAttempts': 30})
+    except Exception as e:
+        print(f"⚠️  Wait for {function_name} failed (continuing anyway): {e}")
+
+def get_git_branch():
+    """現在のGitブランチ名を取得"""
+    try:
+        return subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD']).decode('ascii').strip()
+    except:
+        return "unknown"
 
 def deploy_lambda_functions():
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+    # 環境選択
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    env_file = f".env.{env_arg}" if env_arg else ".env"
+    env_path = os.path.join(BASE_DIR, env_file)
+    
+    if os.path.exists(env_path):
+        print(f"📖 Loading environment: {env_file}")
+        load_dotenv(env_path)
+    else:
+        load_dotenv(os.path.join(BASE_DIR, ".env"))
+
     aws_region = os.getenv('AWS_REGION', 'ap-northeast-1')
     lambda_client = boto3.client('lambda', region_name=aws_region)
+    git_rev = get_git_revision()
+    git_branch = get_git_branch()
+
+    print(f"🌿 Current Branch: {git_branch}")
+    print(f"📌 Target Region: {aws_region}")
+    
+    # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
+    if os.getenv('AUTO_CONFIRM') != '1':
+        confirm = input(f"Proceed with deployment to {aws_region}? (y/N): ")
+        if confirm.lower() != 'y':
+            print("🛑 Deployment cancelled.")
+            sys.exit(1)
+
+        # 本番環境（引数なし）の場合のみ、さらなる確認を求める
+        if not env_arg:
+            print("\n🚨 ATTENTION: You are about to deploy to the PRODUCTION environment.")
+            print("This will overwrite the live Lambda functions used in the main environment.")
+            prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
+            if prod_confirm != 'DEPLOY-PROD':
+                print("🛑 Production deployment aborted.")
+                sys.exit(1)
 
     # ローカルフォルダ名と環境変数名のマッピング
     lambda_mapping = [
@@ -40,6 +96,9 @@ def deploy_lambda_functions():
         print(f"📦 Packaging and deploying {function_name}...")
 
         try:
+            # 前のステップ（Layer更新等）による競合を避けるために待機
+            wait_for_lambda_ready(lambda_client, function_name)
+
             with open(file_path, "rb") as f:
                 file_content = f.read()
 
@@ -60,6 +119,15 @@ def deploy_lambda_functions():
             if remote_config.get('CodeSha256') == local_sha256:
                 print(f"✨ Skipping {function_name}: No changes detected.")
                 continue
+
+            # 説明文に Git リビジョンを記録
+            lambda_client.update_function_configuration(
+                FunctionName=function_name,
+                Description=f"Deployed from Git: {git_rev} at 2026-04-11"
+            )
+
+            # 説明文更新の完了を待機 (コード更新との競合防止)
+            wait_for_lambda_ready(lambda_client, function_name)
 
             # Lambda のコードを更新
             response = lambda_client.update_function_code(

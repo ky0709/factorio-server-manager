@@ -3,52 +3,79 @@ import requests
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
 from dotenv import load_dotenv
+import sys
 import time
 
 # スクリプトの場所を基準にプロジェクトルートを取得
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# .envファイルをルートから読み込む
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+# 引数に基づいて環境ファイルを切り替え (例: python register.py dev)
+env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+env_file = f".env.{env_arg}" if env_arg else ".env"
+env_path = os.path.join(BASE_DIR, env_file)
+
+if os.path.exists(env_path):
+    print(f"📖 Loading environment: {env_file}")
+    load_dotenv(env_path)
+else:
+    print(f"⚠️  Environment file {env_file} not found, falling back to default .env")
+    load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+# 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
+if os.getenv('AUTO_CONFIRM') != '1':
+    confirm = input(f"Proceed with Discord registration and SSM sync for '{env_file if env_arg else '.env (PROD)'}'? (y/N): ")
+    if confirm.lower() != 'y':
+        print("🛑 Operation cancelled.")
+        sys.exit(1)
+
+    # 本番環境（引数なし）の場合のみ、さらなる確認を求める
+    if not env_arg:
+        print("\n🚨 ATTENTION: You are about to sync secrets to the PRODUCTION SSM Parameter Store.")
+        prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
+        if prod_confirm != 'DEPLOY-PROD':
+            print("🛑 Production sync aborted.")
+            sys.exit(1)
 
 # 環境変数から値を取得
 BOT_TOKEN = os.getenv('DISCORD_TOKEN')
 APP_ID = os.getenv('APP_ID')
 GUILD_ID = os.getenv('GUILD_ID')
 AWS_REGION = os.getenv('AWS_REGION', 'ap-northeast-1')
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-AWS_SESSION_TOKEN = os.getenv('AWS_SESSION_TOKEN')
+# 注: 認証情報は AWS_PROFILE 環境変数または標準の検索チェーンを通じて自動的に取得されます
+
+# SSMパスのベースを動的に決定 (例: /D_factorio/)
+SSM_BASE = os.getenv('SSM_PARAMETER_PATH', '/factorio/')
+print(f"📌 SSM Base Path: {SSM_BASE}")
 
 # 同期対象の機密情報
 SECRETS_TO_SYNC = {
-    'DISCORD_WEBHOOK_URL': '/factorio/DISCORD_WEBHOOK_URL',
-    'DISCORD_LOG_WEBHOOK_URL': '/factorio/DISCORD_LOG_WEBHOOK_URL',
-    'RCON_PASSWORD': '/factorio/RCON_PASSWORD',
-    'ADMIN_USER_IDS': '/factorio/ADMIN_USER_IDS',
-    'ADMIN_ROLE_IDS': '/factorio/ADMIN_ROLE_IDS',
-    'RESTRICTED_COMMAND_STRINGS': '/factorio/RESTRICTED_COMMAND_STRINGS',
-    'DISCORD_PUBLIC_KEY': '/factorio/DISCORD_PUBLIC_KEY',
-    'EXECUTOR_LAMBDA_NAME': '/factorio/EXECUTOR_LAMBDA_NAME',
-    'NOTIFIER_LAMBDA_NAME': '/factorio/NOTIFIER_LAMBDA_NAME',
-    'INTERACTOR_LAMBDA_NAME': '/factorio/INTERACTOR_LAMBDA_NAME',
-    'AWS_REGION': '/factorio/REGION',
-    'INSTANCE_ID': '/factorio/INSTANCE_ID',
-    'EPHEMERAL_COMMAND_STRINGS': '/factorio/EPHEMERAL_COMMAND_STRINGS',
-    'DYNAMODB_TABLE_NAME': '/factorio/DYNAMODB_TABLE_NAME',
-    'S3_BUCKET_NAME': '/factorio/S3_BUCKET_NAME',
-    'WORKER_LAMBDA_NAME': '/factorio/WORKER_LAMBDA_NAME',
-    'COMMAND_ROUTING': '/factorio/COMMAND_ROUTING',
-    'RCON_PORT': '/factorio/RCON_PORT',
-    'SAVE_FILE_KEY': '/factorio/SAVE_FILE_KEY',
-    'GAME_PASSWORD': '/factorio/GAME_PASSWORD',
-    'FACTORIO_GAME_PORT': '/factorio/FACTORIO_GAME_PORT',
-    'RCON_COMMAND_TIMEOUT_SECONDS': '/factorio/RCON_COMMAND_TIMEOUT_SECONDS',
-    'RCON_UNRESPONSIVE_THRESHOLD': '/factorio/RCON_UNRESPONSIVE_THRESHOLD',
-    'ZERO_PLAYER_THRESHOLD': '/factorio/ZERO_PLAYER_THRESHOLD',
-    'S3_SYNC_WAIT_THRESHOLD_SECONDS': '/factorio/S3_SYNC_WAIT_THRESHOLD_SECONDS',
-    'RCON_READY_CHECK_INTERVAL_SECONDS': '/factorio/RCON_READY_CHECK_INTERVAL_SECONDS',
-    'RCON_READY_CHECK_MAX_ATTEMPTS': '/factorio/RCON_READY_CHECK_MAX_ATTEMPTS',
+    'DISCORD_WEBHOOK_URL': f'{SSM_BASE}DISCORD_WEBHOOK_URL',
+    'DISCORD_LOG_WEBHOOK_URL': f'{SSM_BASE}DISCORD_LOG_WEBHOOK_URL',
+    'RCON_PASSWORD': f'{SSM_BASE}RCON_PASSWORD',
+    'ADMIN_USER_IDS': f'{SSM_BASE}ADMIN_USER_IDS',
+    'ADMIN_ROLE_IDS': f'{SSM_BASE}ADMIN_ROLE_IDS',
+    'RESTRICTED_COMMAND_STRINGS': f'{SSM_BASE}RESTRICTED_COMMAND_STRINGS',
+    'DISCORD_PUBLIC_KEY': f'{SSM_BASE}DISCORD_PUBLIC_KEY',
+    'EXECUTOR_LAMBDA_NAME': f'{SSM_BASE}EXECUTOR_LAMBDA_NAME',
+    'NOTIFIER_LAMBDA_NAME': f'{SSM_BASE}NOTIFIER_LAMBDA_NAME',
+    'INTERACTOR_LAMBDA_NAME': f'{SSM_BASE}INTERACTOR_LAMBDA_NAME',
+    'AWS_REGION': f'{SSM_BASE}REGION',
+    'INSTANCE_ID': f'{SSM_BASE}INSTANCE_ID',
+    'EPHEMERAL_COMMAND_STRINGS': f'{SSM_BASE}EPHEMERAL_COMMAND_STRINGS',
+    'DYNAMODB_TABLE_NAME': f'{SSM_BASE}DYNAMODB_TABLE_NAME',
+    'S3_BUCKET_NAME': f'{SSM_BASE}S3_BUCKET_NAME',
+    'WORKER_LAMBDA_NAME': f'{SSM_BASE}WORKER_LAMBDA_NAME',
+    'COMMAND_ROUTING': f'{SSM_BASE}COMMAND_ROUTING',
+    'RCON_PORT': f'{SSM_BASE}RCON_PORT',
+    'SAVE_FILE_KEY': f'{SSM_BASE}SAVE_FILE_KEY',
+    'GAME_PASSWORD': f'{SSM_BASE}GAME_PASSWORD',
+    'FACTORIO_GAME_PORT': f'{SSM_BASE}FACTORIO_GAME_PORT',
+    'RCON_COMMAND_TIMEOUT_SECONDS': f'{SSM_BASE}RCON_COMMAND_TIMEOUT_SECONDS',
+    'RCON_UNRESPONSIVE_THRESHOLD': f'{SSM_BASE}RCON_UNRESPONSIVE_THRESHOLD',
+    'ZERO_PLAYER_THRESHOLD': f'{SSM_BASE}ZERO_PLAYER_THRESHOLD',
+    'S3_SYNC_WAIT_THRESHOLD_SECONDS': f'{SSM_BASE}S3_SYNC_WAIT_THRESHOLD_SECONDS',
+    'RCON_READY_CHECK_INTERVAL_SECONDS': f'{SSM_BASE}RCON_READY_CHECK_INTERVAL_SECONDS',
+    'RCON_READY_CHECK_MAX_ATTEMPTS': f'{SSM_BASE}RCON_READY_CHECK_MAX_ATTEMPTS',
 }
 
 def register_commands():
@@ -210,18 +237,12 @@ def sync_secrets_to_ssm():
     try:
         ssm = boto3.client(
             'ssm',
-            region_name=AWS_REGION,
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-            aws_session_token=AWS_SESSION_TOKEN
+            region_name=AWS_REGION
         )
         
         lambda_client = boto3.client(
             'lambda',
-            region_name=AWS_REGION,
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-            aws_session_token=AWS_SESSION_TOKEN
+            region_name=AWS_REGION
         )
         
         for env_key, ssm_path in SECRETS_TO_SYNC.items():
@@ -266,7 +287,8 @@ def sync_secrets_to_ssm():
                             'SAVE_FILE_KEY',
                             'DISCORD_PUBLIC_KEY' # Interactorの高速化のために追加
                         ]}, 
-                        'LAST_SSM_SYNC': sync_time
+                        'LAST_SSM_SYNC': sync_time,
+                        'SSM_PARAMETER_PATH': SSM_BASE
                     }}
                 )
                 print(f"♻️  Forced refresh for {lb}")

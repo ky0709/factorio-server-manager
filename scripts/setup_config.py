@@ -6,8 +6,32 @@ def setup_configs():
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    # .env ファイルをルートから読み込む
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    # 環境選択 (例: python setup_config.py dev)
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    env_file = f".env.{env_arg}" if env_arg else ".env"
+    env_path = os.path.join(BASE_DIR, env_file)
+    
+    if os.path.exists(env_path):
+        print(f"📖 Loading environment: {env_file}")
+        load_dotenv(env_path)
+    else:
+        print(f"⚠️  Environment file {env_file} not found, falling back to default .env")
+        load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+    # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
+    if os.getenv('AUTO_CONFIRM') != '1':
+        confirm = input(f"Proceed with local config generation for '{env_file if env_arg else '.env (PROD)'}'? (y/N): ")
+        if confirm.lower() != 'y':
+            print("🛑 Operation cancelled.")
+            sys.exit(1)
+
+        # 本番環境（引数なし）の場合のみ、さらなる確認を求める
+        if not env_arg:
+            print("\n🚨 ATTENTION: You are about to generate config files for the PRODUCTION environment.")
+            prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
+            if prod_confirm != 'DEPLOY-PROD':
+                print("🛑 Production setup aborted.")
+                sys.exit(1)
 
     # 環境変数名とプレースホルダーの対応定義
     env_mapping = {

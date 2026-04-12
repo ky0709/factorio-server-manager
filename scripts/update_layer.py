@@ -6,10 +6,45 @@ import io
 import hashlib
 import base64
 from dotenv import load_dotenv
+import sys
+
+def wait_for_lambda_ready(client, function_name):
+    """Lambda関数が更新完了状態になるまで待機"""
+    try:
+        waiter = client.get_waiter('function_updated_v2')
+        waiter.wait(FunctionName=function_name, WaiterConfig={'Delay': 2, 'MaxAttempts': 30})
+    except Exception as e:
+        print(f"⚠️  Wait for {function_name} timed out: {e}")
 
 def update_lambda_layer():
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # 環境選択
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    env_file = f".env.{env_arg}" if env_arg else ".env"
+    env_path = os.path.join(BASE_DIR, env_file)
+    
+    if os.path.exists(env_path):
+        print(f"📖 Loading environment: {env_file}")
+        load_dotenv(env_path)
+    else:
+        load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+    # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
+    if os.getenv('AUTO_CONFIRM') != '1':
+        confirm = input(f"Proceed with Layer update for '{env_file if env_arg else '.env (PROD)'}'? (y/N): ")
+        if confirm.lower() != 'y':
+            print("🛑 Operation cancelled.")
+            sys.exit(1)
+
+        # 本番環境（引数なし）の場合のみ、さらなる確認を求める
+        if not env_arg:
+            print("\n🚨 ATTENTION: You are about to update the PRODUCTION Lambda Layer.")
+            prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
+            if prod_confirm != 'DEPLOY-PROD':
+                print("🛑 Production update aborted.")
+                sys.exit(1)
 
     print("\n--- Packaging and Uploading Lambda Layer ---")
     layer_dir = os.path.join(BASE_DIR, "aws/Lambda/factorio_common_layer")
@@ -37,10 +72,11 @@ def update_lambda_layer():
 
     # 2. ハッシュ比較による変更検知
     try:
+        layer_name = os.getenv('COMMON_LAYER_NAME', 'factorio-common-utils')
         lambda_client = boto3.client('lambda', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
         
         local_sha256 = base64.b64encode(hashlib.sha256(zip_content).digest()).decode()
-        all_versions = lambda_client.list_layer_versions(LayerName='factorio-common-utils').get('LayerVersions', [])
+        all_versions = lambda_client.list_layer_versions(LayerName=layer_name).get('LayerVersions', [])
         
         if all_versions:
             latest_v = all_versions[0] # list_layer_versions は最新順に返却される
@@ -50,7 +86,7 @@ def update_lambda_layer():
 
         # 3. AWS Lambda Layer へアップロード
         response = lambda_client.publish_layer_version(
-            LayerName='factorio-common-utils',
+            LayerName=layer_name,
             Content={'ZipFile': zip_content},
             CompatibleRuntimes=['python3.12']
         )
@@ -59,7 +95,7 @@ def update_lambda_layer():
 
         # --- 古いレイヤーバージョンのクリーンアップ (最新3つを残す) ---
         print("\n--- Cleaning up old Layer Versions (keeping latest 3) ---")
-        all_versions = lambda_client.list_layer_versions(LayerName='factorio-common-utils').get('LayerVersions', [])
+        all_versions = lambda_client.list_layer_versions(LayerName=layer_name).get('LayerVersions', [])
         # バージョン番号の降順でソート
         sorted_versions = sorted(all_versions, key=lambda x: x['Version'], reverse=True)
         
@@ -67,7 +103,7 @@ def update_lambda_layer():
             for old_v in sorted_versions[3:]:
                 v_num = old_v['Version']
                 try:
-                    lambda_client.delete_layer_version(LayerName='factorio-common-utils', VersionNumber=v_num)
+                    lambda_client.delete_layer_version(LayerName=layer_name, VersionNumber=v_num)
                     print(f"🗑️  Deleted old version: {v_num}")
                 except Exception as e:
                     print(f"⚠️  Failed to delete version {v_num}: {e}")
@@ -90,7 +126,7 @@ def update_lambda_layer():
                 
                 # 他のレイヤー（pynacl等）は維持し、factorio-common-utils だけを差し替える
                 # 既存のリストから factorio-common-utils を除外
-                new_layers = [a for a in current_layers if 'layer:factorio-common-utils' not in a]
+                new_layers = [a for a in current_layers if f'layer:{layer_name}' not in a]
                 new_layers.append(new_layer_arn)
 
                 lambda_client.update_function_configuration(
@@ -98,6 +134,9 @@ def update_lambda_layer():
                     Layers=new_layers
                 )
                 print(f"✅ Updated {lb} to use layer version {response['Version']}")
+                
+                # 設定更新の完了を待機（次のデプロイステップとの競合防止）
+                wait_for_lambda_ready(lambda_client, lb)
             except Exception as e:
                 print(f"⚠️  Could not update {lb}: {e}")
 

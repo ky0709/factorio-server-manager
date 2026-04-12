@@ -6,79 +6,15 @@ from datetime import datetime
 # レイヤーからのインポート
 from factorio_common.utils import JST, get_client, fetch_config_from_ssm, run_rcon_command, format_msg, notify_via_lambda
 
-TEXT_RESOURCES = {
-    "common": {
-        "unknown_cmd": {"ja": "❌ 不明なコマンドです。", "en": "❌ Unknown command."},
-        "server_offline": {"ja": "❌ サーバーが起動していないため、この操作は実行できません。", "en": "❌ Server is not running."},
-    },
-    "status": {
-        "running": {
-            "ja": "✅ **稼働中**\n- 接続先: `{ip}:{port}`\n- オンライン: `{players}`名 (`{names}`)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
-            "en": "✅ **Running**\n- Address: `{ip}:{port}`\n- Online: `{players}` (`{names}`)\n- Last Save: `{save_time}` (`{size}`MB)"
-        },
-        "stopped": {
-            "ja": "🔴 **停止中**\n- 最終セーブ: `{save_time}` (`{size}`MB)",
-            "en": "🔴 **Stopped**\n- Last Save: `{save_time}` (`{size}`MB)"
-        },
-        "transition": {"ja": "⏳ **状態遷移中** (`{state}`)", "en": "⏳ **Transitioning** (`{state}`)"},
-        "starting": {
-            "ja": "⏳ **起動処理中** (経過時間: `{elapsed}`秒)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
-            "en": "⏳ **Starting Process** (Elapsed: `{elapsed}`s)\n- Last Save: `{save_time}` (`{size}`MB)"
-        },
-        "stopping": {
-            "ja": "⏳ **停止処理中** (経過時間: `{elapsed}`秒)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
-            "en": "⏳ **Stopping Process** (Elapsed: `{elapsed}`s)\n- Last Save: `{save_time}` (`{size}`MB)"
-        },
-        "syncing": {
-            "ja": "⏳ (S3同期中...) ",
-            "en": "⏳ (S3 Syncing...) "
-        }
-    },
-    "start": {
-        "success": {"ja": "🚀 サーバーの起動を開始しました。", "en": "🚀 Starting server..."},
-        "already": {"ja": "⚠️ サーバーは既に起動しているか、準備中です。", "en": "⚠️ Server is already running or pending."},
-        "completed": {
-            "ja": "- 接続先: `{ip}:{port}`\n- パスワード: `{pwd}`",
-            "en": "- Address: `{ip}:{port}`\n- Password: `{pwd}`"
-        },
-        "completed_title": {
-            "ja": "✨ Factorio サーバー起動完了",
-            "en": "✨ Factorio Server Ready"
-        }
-    },
-    "stop": {
-        "success": {"ja": "🔌 サーバーの停止を開始しました (セーブ・クリーンアップ実行中)。", "en": "🔌 Stopping server (Saving and cleaning up...)"},
-        "already": {"ja": "⚠️ サーバーは既に停止しているか、停止処理中です。", "en": "⚠️ Server is already stopped or stopping."},
-        "process_stopped": {"ja": "⏹️ Factorioプロセスを正常に終了しました。", "en": "⏹️ Factorio process stopped successfully."},
-        "completed": {"ja": "✅ サーバーの全停止工程が完了しました。", "en": "✅ Server shutdown sequence completed."}
-    },
-    "save": {
-        "success": {"ja": "💾 セーブコマンドを送信しました。S3への反映には数分かかる場合があります。", "en": "💾 Save command sent. S3 sync may take a few minutes."},
-    },
-    "pass": {
-        "not_set": {"ja": "❌ パスワードは設定されていません。", "en": "❌ Password is not set."},
-        "display": {"ja": "🔑 パスワード: `{pwd}`", "en": "🔑 Password: `{pwd}`"}
-    },
-    "license": {
-        "content": {
-            "ja": "### 📜 License Information\n本ソフトウェアは **MIT License** の下で公開されています。\n\n**■ 許諾事項**\nどなたでも無償で本ソフトウェアの使用、複写、変更、結合、掲載、頒布、サブライセンス、および販売を行うことができます。\n\n**■ 利用条件**\nすべての複製または重要な部分に、後述の著作権表示および本許諾表示を記載する必要があります。\n\n**■ 免責事項**\n本ソフトウェアは「現状のまま」提供されます。作者は、ソフトウェアの使用に起因する損害やその他の責任について一切の義務を負いません。\n\n---\n**Copyright (c) 2026 ky0709**\n**GitHub:** https://github.com/ky0709/factorio-server-manager",
-            "en": "### 📜 License Information\nThis software is published under the **MIT License**.\n\n**■ Permissions**\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software.\n\n**■ Conditions**\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\n**■ Disclaimer**\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND. THE AUTHORS OR COPYRIGHT HOLDERS SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY.\n\n---\n**Copyright (c) 2026 ky0709**\n**GitHub:** https://github.com/ky0709/factorio-server-manager"
-        }
-    }
-}
-
-COLOR_GREEN = 0x2ECC71
-COLOR_RED = 0xE74C3C
-COLOR_YELLOW = 0xF1C40F
-COLOR_BLUE = 0x3498DB
-
 def get_msg(category, key, locale='ja', **kwargs):
-    return format_msg(TEXT_RESOURCES, category, key, locale, **kwargs)
+    return format_msg({}, category, key, locale, **kwargs)
+
+COLOR_GREEN, COLOR_BLUE = 0x2ECC71, 0x3498DB
 
 config = {"initialized": False}
 
 def init_config():
-    ssm_config = fetch_config_from_ssm('/factorio/')
+    ssm_config = fetch_config_from_ssm()
     config.update(ssm_config)
     global factorio_state_table
     factorio_state_table = get_client('dynamodb', True).Table(config.get('dynamodb_table_name'))
@@ -98,14 +34,9 @@ def notify(content, mode='followup', event=None, embeds=None, components=None):
         components=components
     )
 
-def execute_ec2_command(action, event):
-    locale = event.get('locale', 'ja')
-    ec2 = get_client('ec2')
-    inst = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
-    state = inst['State']['Name']
-    ip = inst.get('PublicIpAddress')
+# --- アクションハンドラ定義 ---
 
-    if action == 'status':
+def handle_status(event, ec2, inst, state, ip, locale):
         # カタログから現在のセーブ時刻を取得 (全状態で共通)
         save_time = "-"
         save_size = "-"
@@ -201,7 +132,7 @@ def execute_ec2_command(action, event):
         
         return get_msg("status", "transition", locale, state=state, save_time=display_save_time, size=save_size)
 
-    elif action == 'start':
+def handle_start(event, ec2, inst, state, ip, locale):
         if state == 'stopped':
             start_process_time = time.time()
 
@@ -253,7 +184,7 @@ def execute_ec2_command(action, event):
             return get_msg("start", "success", locale)
         return get_msg("start", "already", locale)
 
-    elif action == 'stop':
+def handle_stop(event, ec2, inst, state, ip, locale):
         if state == 'running':
             start_stop_time = time.time()
 
@@ -303,7 +234,7 @@ def execute_ec2_command(action, event):
             return get_msg("stop", "process_stopped", locale)
         return get_msg("stop", "already", locale)
 
-    elif action == 'save':
+def handle_save(event, ec2, inst, state, ip, locale):
         if state != 'running': return get_msg("common", "server_offline", locale)
         run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
         # カタログ (DynamoDB) を更新
@@ -315,11 +246,11 @@ def execute_ec2_command(action, event):
         )
         return get_msg("save", "success", locale)
 
-    elif action == 'pass':
+def handle_pass(event, ec2, inst, state, ip, locale):
         pwd = config.get("game_password")
         return get_msg("pass", "display", locale, pwd=pwd) if pwd else get_msg("pass", "not_set", locale)
 
-    elif action == 'license':
+def handle_license(event, ec2, inst, state, ip, locale):
         return {
             "embeds": [{
                 "title": "⚖️ MIT License",
@@ -329,6 +260,26 @@ def execute_ec2_command(action, event):
             }]
         }
 
+# アクションとハンドラの紐付け
+ACTION_HANDLERS = {
+    'status': handle_status,
+    'start': handle_start,
+    'stop': handle_stop,
+    'save': handle_save,
+    'pass': handle_pass,
+    'license': handle_license
+}
+
+def execute_ec2_command(action, event):
+    locale = event.get('locale', 'ja')
+    ec2 = get_client('ec2')
+    inst = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
+    state = inst['State']['Name']
+    ip = inst.get('PublicIpAddress')
+
+    handler = ACTION_HANDLERS.get(action)
+    if handler:
+        return handler(event, ec2, inst, state, ip, locale)
     return get_msg("common", "unknown_cmd", locale)
 
 def lambda_handler(event, context):

@@ -2,10 +2,38 @@ import os
 import boto3
 import json
 from dotenv import load_dotenv
+import sys
 
 def deploy_policies():
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # 環境選択 (例: python deploy_policies.py dev)
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    env_file = f".env.{env_arg}" if env_arg else ".env"
+    env_path = os.path.join(BASE_DIR, env_file)
+    
+    if os.path.exists(env_path):
+        print(f"📖 Loading environment: {env_file}")
+        load_dotenv(env_path)
+    else:
+        print(f"⚠️  Environment file {env_file} not found, falling back to default .env")
+        load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+    # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
+    if os.getenv('AUTO_CONFIRM') != '1':
+        confirm = input(f"Proceed with IAM Policy deployment for '{env_file if env_arg else '.env (PROD)'}'? (y/N): ")
+        if confirm.lower() != 'y':
+            print("🛑 Operation cancelled.")
+            sys.exit(1)
+
+        # 本番環境（引数なし）の場合のみ、さらなる確認を求める
+        if not env_arg:
+            print("\n🚨 ATTENTION: You are about to update PRODUCTION IAM Policies.")
+            prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
+            if prod_confirm != 'DEPLOY-PROD':
+                print("🛑 Production deployment aborted.")
+                sys.exit(1)
 
     account_id = os.getenv('AWS_ACCOUNT_ID', '').strip()
     if not account_id:
