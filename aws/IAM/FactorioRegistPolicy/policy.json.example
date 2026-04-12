@@ -117,6 +117,16 @@
             ]
         },
         {
+            "Sid": "EC2ReadOnlyForTesting",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeInstances"
+            ],
+            "Resource": [
+                "*"
+            ]
+        },
+        {
             "Sid": "IAMPassRole",
             "Effect": "Allow",
             "Action": "iam:PassRole",

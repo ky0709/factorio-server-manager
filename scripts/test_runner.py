@@ -3,14 +3,15 @@ import json
 import os
 from dotenv import load_dotenv
 import sys
+import re
 from datetime import datetime
 
 # プロジェクトルートの.envを読み込み
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 環境選択 (例: python test_runner.py dev)
-env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
-env_file = f".env.{env_arg}" if env_arg else ".env"
+env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
+env_file = ".env" if env_arg == "prod" else f".env.{env_arg}"
 env_path = os.path.join(BASE_DIR, env_file)
 
 if os.path.exists(env_path):
@@ -20,6 +21,7 @@ else:
     load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 lambda_client = boto3.client('lambda', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
+ec2_client = boto3.client('ec2', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
 
 def invoke_lambda(function_name, payload):
     print(f"🚀 Invoking {function_name}...")
@@ -36,9 +38,21 @@ def invoke_lambda(function_name, payload):
         print(f"❌ Failed to invoke {function_name}: {e}")
         return None
 
+def wait_for_ec2_state(instance_id, state):
+    print(f"⏳ Waiting for instance {instance_id} to reach state: {state}...")
+    if state == 'stopped':
+        waiter = ec2_client.get_waiter('instance_stopped')
+    elif state == 'running':
+        waiter = ec2_client.get_waiter('instance_running')
+    else:
+        return
+    waiter.wait(InstanceIds=[instance_id], WaiterConfig={'Delay': 15, 'MaxAttempts': 40})
+    print(f"✅ Instance is now {state}.")
+
 def run_flow_test():
     print("=== Factorio Server Manager Integration Test Flow ===\n")
     test_results = []
+    captured_version_id = None
 
     # 1. Notifier 単体テスト (Webhookモード)
     print("[Test 1] Notifier Webhook Mode")
@@ -118,21 +132,56 @@ def run_flow_test():
     else:
         print("  ❌ Start check failed: No response.")
 
-    # 5. Worker 連携テスト (Auto-Check 停止トリガーのモックテスト)
-    print("\n[Test 5] Worker Auto-Check logic (Mocking Auto-Shutdown Trigger)")
+    # 5. Executor 単体テスト (Save確認)
+    print("\n[Test 5] Executor Save Check")
+    save_payload = {"action": "save", "test_mode": True}
+    save_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), save_payload)
+    if save_result and save_result.get('content'):
+        assert "💾" in save_result['content']
+        test_results.append({"name": "Executor Save", "ok": True})
+        print("  ✅ Save command content check passed.")
+    else:
+        test_results.append({"name": "Executor Save", "ok": False})
+
+    # 6. Executor 停止テスト (Action実行)
+    print("\n[Test 6] Executor Stop Action")
+    stop_payload = {"action": "stop", "test_mode": True}
+    stop_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), stop_payload)
+    if stop_result:
+        # 停止シーケンスが開始されたことを確認
+        test_results.append({"name": "Executor Stop (Initiate)", "ok": True})
+        
+        # 実際に停止するまで待機 (Restore Select のテストに必要)
+        try:
+            wait_for_ec2_state(os.getenv('INSTANCE_ID'), 'stopped')
+            test_results.append({"name": "EC2 Stop Wait", "ok": True})
+        except Exception as e:
+            print(f"❌ Stop wait failed: {e}")
+            test_results.append({"name": "EC2 Stop Wait", "ok": False})
+    else:
+        test_results.append({"name": "Executor Stop (Initiate)", "ok": False})
+
+
+    # 7. Worker 連携テスト (Auto-Check 停止トリガーのモックテスト)
+    print("\n[Test 7] Worker Auto-Check logic (Mocking Auto-Shutdown Trigger)")
     auto_check_payload = {
         "action": "auto-check",
         "test_mode": True,
         "mock_data": {
-            "rcon_res": "Online players (0)",
-            "zero_player_count": 2 # すでに2回無人だった状態をシミュレート
+            "rcon_res": "Online players (0):", # 正常応答かつプレイヤー0人をシミュレート
+            "zero_player_count": 2             # 2 + 1 = 3 となり、停止閾値に到達させる
         }
     }
     res5 = invoke_lambda(os.getenv('WORKER_LAMBDA_NAME', 'Factorio_Worker'), auto_check_payload)
-    test_results.append({"name": "Worker Auto-Check Logic", "ok": res5 and res5.get('action') == 'invoke_executor'})
+    if res5 and res5.get('action') == 'invoke_executor':
+        test_results.append({"name": "Worker Auto-Check Logic", "ok": True})
+        print("  ✅ Auto-shutdown trigger check passed.")
+    else:
+        test_results.append({"name": "Worker Auto-Check Logic", "ok": False})
+        print("  ❌ Auto-shutdown trigger check failed.")
 
-    # 6. Worker 単体テスト (Restore List確認)
-    print("\n[Test 6] Worker Restore List Check")
+    # 8. Worker 単体テスト (Restore List確認)
+    print("\n[Test 8] Worker Restore List Check")
     restore_list_payload = {
         "action": "restore",
         "data": {
@@ -155,25 +204,18 @@ def run_flow_test():
         assert "履歴" in restore_list_result['content']
         assert "MB" in restore_list_result['content']
         assert "ID:" in restore_list_result['content']
+        # IDを抽出して次のテストで使用
+        match = re.search(r"ID: `([^`]+)`", restore_list_result['content'])
+        if match: captured_version_id = match.group(1)
+
         test_results.append({"name": "Worker Restore List", "ok": True})
         print("  ✅ Restore List content check passed.")
     else:
         test_results.append({"name": "Worker Restore List", "ok": False})
         print("  ❌ Restore List content check failed: No content returned or unexpected format.")
 
-    # 7. Executor 単体テスト (Save確認)
-    print("\n[Test 7] Executor Save Check")
-    save_payload = {"action": "save", "test_mode": True}
-    save_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), save_payload)
-    if save_result and save_result.get('content'):
-        assert "💾" in save_result['content']
-        test_results.append({"name": "Executor Save", "ok": True})
-        print("  ✅ Save command content check passed.")
-    else:
-        test_results.append({"name": "Executor Save", "ok": False})
-
-    # 8. Executor 単体テスト (Pass確認)
-    print("\n[Test 8] Executor Pass Check")
+    # 9. Executor 単体テスト (Pass確認)
+    print("\n[Test 9] Executor Pass Check")
     pass_payload = {"action": "pass", "test_mode": True}
     pass_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), pass_payload)
     if pass_result and pass_result.get('content'):
@@ -183,8 +225,8 @@ def run_flow_test():
     else:
         test_results.append({"name": "Executor Pass", "ok": False})
 
-    # 9. Executor 単体テスト (License確認)
-    print("\n[Test 9] Executor License Check")
+    # 10. Executor 単体テスト (License確認)
+    print("\n[Test 10] Executor License Check")
     license_payload = {"action": "license", "test_mode": True}
     license_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), license_payload)
     if license_result and license_result.get('embeds'):
@@ -194,8 +236,33 @@ def run_flow_test():
     else:
         test_results.append({"name": "Executor License", "ok": False})
 
-    # 10. Worker 単体テスト (Restore Select バリデーション)
-    print("\n[Test 10] Worker Restore Select Validation (ID missing)")
+    # 11. Worker 単体テスト (Restore Select 実行テスト)
+    print("\n[Test 11] Worker Restore Select (Mocked)")
+    if captured_version_id:
+        restore_select_payload = {
+            "action": "restore",
+            "data": {"options": [{"name": "select", "options": [{"name": "version_id", "value": captured_version_id}]}]},
+            "test_mode": True
+        }
+        sel_result = invoke_lambda(os.getenv('WORKER_LAMBDA_NAME'), restore_select_payload)
+        if sel_result and sel_result.get('content') and "完了" in sel_result['content']:
+            test_results.append({"name": "Worker Restore Select", "ok": True})
+            print("  ✅ Restore Select mock execution passed.")
+        else:
+            test_results.append({"name": "Worker Restore Select", "ok": False})
+    else:
+        print("  ⚠️ Skipping Restore Select test: No Version ID captured.")
+
+    # 12. 最終 Status 確認 (停止中であること)
+    print("\n[Test 12] Final Status Check (Should be Stopped)")
+    final_status_payload = {"action": "status", "test_mode": True}
+    final_res = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), final_status_payload)
+    if final_res and final_res.get('content') and "停止中" in final_res['content']:
+        test_results.append({"name": "Final State (Stopped)", "ok": True})
+        print("  ✅ Final state is confirmed as Stopped.")
+    else:
+        test_results.append({"name": "Final State (Stopped)", "ok": False})
+
     restore_select_payload = {
         "action": "restore",
         "data": {"options": [{"name": "select", "options": []}]},
@@ -230,6 +297,11 @@ def run_flow_test():
 
     print("\n=== Test Flow Completed ===")
     print("注意: InteractorはDiscord署名検証が必要なため、Discord画面上からのテストを推奨します。")
+
+    # 失敗が1つでもある場合は、パイプラインを止めるために非ゼロで終了
+    if success_count < total_tests:
+        print(f"\n❌ Some tests failed ({success_count}/{total_tests}).")
+        sys.exit(1)
 
 if __name__ == "__main__":
     # .envに必要な情報があるか確認

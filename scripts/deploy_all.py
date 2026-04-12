@@ -26,13 +26,36 @@ def get_git_hash():
     except Exception:
         return None
 
+def get_git_ref():
+    """現在のGitブランチ名またはハッシュを取得"""
+    try:
+        # まずブランチ名の取得を試みる
+        ref = subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], text=True).strip()
+        # デタッチ状態（HEAD）ならハッシュを取得
+        if ref == 'HEAD':
+            ref = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+        # 改行などの不要な文字を除去
+        return ref.strip()
+    except Exception:
+        print("⚠️  Warning: Git reference could not be determined.")
+        return None
+
+def is_dirty():
+    """ワーキングディレクトリに未コミットの変更があるかチェック"""
+    try:
+        status = subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip()
+        return len(status) > 0
+    except Exception:
+        return False
+
 def main():
     # スクリプトの場所を基準にプロジェクトルートへ移動
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(project_root)
 
-    # 現在のコミットハッシュを取得
+    # 現在のコミットハッシュとリファレンスを保存
     current_commit = get_git_hash()
+    original_ref = get_git_ref()
 
     # ステップのニックネームとスクリプトパスのマッピング
     all_scripts = [
@@ -114,9 +137,20 @@ def main():
                     with open(success_marker, 'r') as f:
                         last_commit = f.read().strip()
                     
-                    if last_commit and last_commit != current_commit:
+                    # ロールバック条件: 1. コミットが異なる, 2. コミットは同じだが未コミットの変更(dirty)がある
+                    needs_rollback = last_commit and (last_commit != current_commit or is_dirty())
+
+                    if needs_rollback:
                         print(f"\n⏪ Rolling back to last successful commit: {last_commit}")
+                        
+                        stashed = False
                         try:
+                            # 未コミットの変更があればスタッシュに退避
+                            if is_dirty():
+                                print("📦 Uncommitted changes detected. Stashing for safety...")
+                                subprocess.run(['git', 'stash', 'push', '-m', f'deploy_all auto-stash before rollback to {last_commit}'], check=True)
+                                stashed = True
+
                             subprocess.run(['git', 'checkout', last_commit], check=True)
                             
                             # 再起動前に自分自身が存在するかチェック
@@ -131,6 +165,16 @@ def main():
                             # 元の引数を引き継いで再実行
                             cmd = [sys.executable, sys.argv[0], env] + sys.argv[2:]
                             subprocess.run(cmd)
+                            
+                            # 処理完了後、元のブランチに戻す
+                            if original_ref:
+                                print(f"\n🔄 Returning to original ref: {original_ref}")
+                                subprocess.run(['git', 'checkout', original_ref], check=True)
+                                
+                                if stashed:
+                                    print("📦 Restoring stashed changes...")
+                                    subprocess.run(['git', 'stash', 'pop'], check=True)
+
                             sys.exit(1)
                         except Exception as e:
                             print(f"❌ Failed to perform git rollback: {e}")

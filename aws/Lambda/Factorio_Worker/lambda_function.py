@@ -156,6 +156,10 @@ def handle_restore(event):
              return get_msg("restore", "failed", locale, err="Version ID is required."), None
 
         try:
+            if event.get('test_mode'):
+                print(f"DEBUG: [Test Mode] Skipping actual S3 copy for version {vid}")
+                return get_msg("restore", "complete", locale, date="TEST_DATE", id=vid), None
+
             s3.copy_object(Bucket=bucket, CopySource={'Bucket': bucket, 'Key': key, 'VersionId': vid}, Key=key)
 
             # 復元成功後、カタログ (DynamoDB) の情報を復元したバージョンの日時に更新

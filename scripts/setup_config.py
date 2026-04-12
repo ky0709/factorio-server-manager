@@ -7,8 +7,8 @@ def setup_configs():
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # 環境選択 (例: python setup_config.py dev)
-    env_arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    env_file = f".env.{env_arg}" if env_arg else ".env"
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
+    env_file = ".env" if env_arg == "prod" else f".env.{env_arg}"
     env_path = os.path.join(BASE_DIR, env_file)
     
     if os.path.exists(env_path):
