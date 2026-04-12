@@ -33,6 +33,16 @@ fi
 
 REGION=${AWS_REGION:-"ap-northeast-1"}
 
+# スケジュール・ルール名の決定 (デフォルトロジック)
+if [ "$ENV_ARG" == "dev" ]; then
+    SUFFIX="-dev"
+else
+    SUFFIX=""
+fi
+AUTO_CHECK_NAME=${AUTO_CHECK_SCHEDULE_NAME:-"Factorio-AutoCheck$SUFFIX"}
+DAILY_STOP_NAME=${DAILY_STOP_SCHEDULE_NAME:-"Factorio-DailyStop$SUFFIX"}
+RULE_NAME=${EC2_STATE_RULE_NAME:-"Factorio-EC2StateChange$SUFFIX"}
+
 echo "🚨🚨🚨 WARNING 🚨🚨🚨"
 echo "You are about to DELETE ALL resources for [$ENV_DISPLAY] in region: $REGION"
 echo "Resources to be removed:"
@@ -43,8 +53,8 @@ echo "  - IAM Policies: $INTERACT_POLICY_NAME, $EXECUTE_POLICY_NAME, etc."
 echo "  - DynamoDB Table: $DYNAMODB_TABLE_NAME"
 echo "  - S3 Bucket: $S3_BUCKET_NAME (INCLUDING ALL CONTENT)"
 echo "  - SSM Parameters under: $SSM_PARAMETER_PATH"
-echo "  - EventBridge Schedules: Factorio-AutoCheck-$ENV_ARG, Factorio-DailyStop-$ENV_ARG"
-echo "  - EventBridge Rule: Factorio-EC2StateChange-$ENV_ARG"
+echo "  - EventBridge Schedules: $AUTO_CHECK_NAME, $DAILY_STOP_NAME"
+echo "  - EventBridge Rule: $RULE_NAME"
 echo ""
 
 read -p "Are you absolutely sure you want to proceed? Type 'DELETE-$ENV_ARG' to confirm: " confirm
@@ -63,13 +73,12 @@ done
 
 # 2. EventBridge Scheduler の削除
 echo "⏰ Deleting EventBridge Schedules..."
-aws scheduler delete-schedule --name "Factorio-AutoCheck-$ENV_ARG" --region "$REGION" 2>/dev/null || true
-aws scheduler delete-schedule --name "Factorio-DailyStop-$ENV_ARG" --region "$REGION" 2>/dev/null || true
+aws scheduler delete-schedule --name "$AUTO_CHECK_NAME" --region "$REGION" 2>/dev/null || true
+aws scheduler delete-schedule --name "$DAILY_STOP_NAME" --region "$REGION" 2>/dev/null || true
 echo "✅ EventBridge Schedules deleted."
 
 # 3. EventBridge Rule の削除
 echo "🔔 Deleting EventBridge Rule..."
-RULE_NAME="Factorio-EC2StateChange-$ENV_ARG"
 aws events remove-targets --rule "$RULE_NAME" --ids "1" --region "$REGION" 2>/dev/null || true
 aws events delete-rule --name "$RULE_NAME" --region "$REGION" 2>/dev/null || true
 echo "✅ EventBridge Rule deleted."

@@ -18,25 +18,11 @@ def setup_configs():
         print(f"⚠️  Environment file {env_file} not found, falling back to default .env")
         load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-    # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
-    if os.getenv('AUTO_CONFIRM') != '1':
-        confirm = input(f"Proceed with local config generation for '{env_file if env_arg else '.env (PROD)'}'? (y/N): ")
-        if confirm.lower() != 'y':
-            print("🛑 Operation cancelled.")
-            sys.exit(1)
-
-        # 本番環境（引数なし）の場合のみ、さらなる確認を求める
-        if not env_arg:
-            print("\n🚨 ATTENTION: You are about to generate config files for the PRODUCTION environment.")
-            prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
-            if prod_confirm != 'DEPLOY-PROD':
-                print("🛑 Production setup aborted.")
-                sys.exit(1)
-
     # 環境変数名とプレースホルダーの対応定義
     env_mapping = {
         'AWS_REGION': "<REGION>",
         'AWS_ACCOUNT_ID': "<ACCOUNT_ID>",
+        'SSM_PARAMETER_PATH': "<SSM_PARAMETER_PATH>",
         'INSTANCE_ID': "<INSTANCE_ID>",
         'S3_BUCKET_NAME': "<S3_BUCKET_NAME>",
         'SAVE_FILE_KEY': "<SAVE_FILE_KEY>",

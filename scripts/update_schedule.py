@@ -8,7 +8,7 @@ def update_schedules():
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # 引数から環境を選択
-    env_arg = sys.argv[1] if len(sys.argv) > 1 else "dev"
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
     env_file = f".env.{env_arg}" if env_arg != "prod" else ".env"
     env_path = os.path.join(BASE_DIR, env_file)
 
@@ -21,11 +21,13 @@ def update_schedules():
     region = os.getenv('AWS_REGION', 'ap-northeast-1')
     account_id = os.getenv('AWS_ACCOUNT_ID')
     
-    # スケジュール名の決定
-    suffix = env_arg
-    auto_check_name = f"Factorio-AutoCheck-{suffix}"
-    daily_stop_name = f"Factorio-DailyStop-{suffix}"
-    role_name = f"FactorioSchedulerRole-{suffix}" if suffix == "dev" else "FactorioSchedulerRole"
+    # スケジュール名およびロール名の決定 (サフィックスロジック)
+    suffix = f"-{env_arg}" if env_arg == "dev" else ""
+    auto_check_name = os.getenv('AUTO_CHECK_SCHEDULE_NAME', f"Factorio-AutoCheck{suffix}")
+    daily_stop_name = os.getenv('DAILY_STOP_SCHEDULE_NAME', f"Factorio-DailyStop{suffix}")
+    
+    role_suffix = f"-{env_arg}" if env_arg == "dev" else ""
+    role_name = f"FactorioSchedulerRole{role_suffix}"
     
     # 式の取得
     auto_check_expr = os.getenv('AUTO_CHECK_SCHEDULE', 'rate(5 minutes)')
@@ -76,7 +78,7 @@ if __name__ == "__main__":
         if not boto3.Session().get_credentials() and not os.getenv('AWS_PROFILE'):
             # .env の AWS_PROFILE を読み込むための再ロード
             BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            env_arg = sys.argv[1] if len(sys.argv) > 1 else "dev"
+            env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
             load_dotenv(os.path.join(BASE_DIR, f".env.{env_arg}" if env_arg != "prod" else ".env"))
         
         update_schedules()

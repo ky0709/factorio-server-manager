@@ -27,6 +27,10 @@ def get_git_hash():
         return None
 
 def main():
+    # スクリプトの場所を基準にプロジェクトルートへ移動
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(project_root)
+
     # 現在のコミットハッシュを取得
     current_commit = get_git_hash()
 
@@ -43,7 +47,7 @@ def main():
     valid_steps = [name for name, _ in all_scripts]
 
     parser = argparse.ArgumentParser(description="Factorio Server Manager Full Deployment Pipeline")
-    parser.add_argument("env", nargs="?", default="dev", help="デプロイ先の環境 (dev/prod)")
+    parser.add_argument("env", nargs="?", default="prod", help="デプロイ先の環境 (dev/prod)")
     parser.add_argument("--skip", nargs="+", choices=valid_steps, help="スキップするステップを指定")
     parser.add_argument("--only", nargs="+", choices=valid_steps, help="実行する特定のステップだけを指定")
     parser.add_argument("--rollback", action="store_true", help="失敗時に自動で cleanup_aws_resources.sh を実行する")
@@ -53,7 +57,11 @@ def main():
     env = args.env
     skip_list = args.skip if args.skip else []
     only_list = args.only if args.only else []
-    success_marker = f".last_success_{env}"
+
+    # デプロイ状態を管理するディレクトリの作成
+    state_dir = os.path.join(project_root, ".deploy_state")
+    os.makedirs(state_dir, exist_ok=True)
+    success_marker = os.path.join(state_dir, f"last_success_{env}")
 
     # 1. 実行確認 (AUTO_CONFIRM が設定されていない場合のみ)
     if os.getenv('AUTO_CONFIRM') != '1':
@@ -110,8 +118,14 @@ def main():
                         print(f"\n⏪ Rolling back to last successful commit: {last_commit}")
                         try:
                             subprocess.run(['git', 'checkout', last_commit], check=True)
-                            print("✅ Checkout successful. Re-starting deployment pipeline...")
                             
+                            # 再起動前に自分自身が存在するかチェック
+                            if not os.path.exists(sys.argv[0]):
+                                print(f"❌ Rollback failed: The script {sys.argv[0]} does not exist in the previous commit.")
+                                print("Please restore the environment manually.")
+                                sys.exit(1)
+
+                            print("✅ Checkout successful. Re-starting deployment pipeline...")
                             # 環境変数をセットして再帰的に実行 (無限ループ防止)
                             os.environ['IS_GIT_ROLLBACK'] = '1'
                             # 元の引数を引き継いで再実行
@@ -139,8 +153,11 @@ def main():
             
     # 3. 成功の記録
     if current_commit:
-        with open(success_marker, 'w') as f:
-            f.write(current_commit)
+        try:
+            with open(success_marker, 'w') as f:
+                f.write(current_commit)
+        except Exception as e:
+            print(f"⚠️  Could not write success marker: {e}")
 
     print(f"\n🎉 Full Deployment for [{env}] completed successfully!")
 

@@ -12,7 +12,7 @@
                 "s3:DeleteBucket"
             ],
             "Resource": [
-                "arn:aws:s3:::<S3_BUCKET_NAME>"
+                "arn:aws:s3:::factorio-*"
             ]
         },
         {
@@ -26,7 +26,7 @@
                 "dynamodb:DeleteTable"
             ],
             "Resource": [
-                "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/<DYNAMODB_TABLE_NAME>"
+                "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/Factorio*"
             ]
         },
         {
@@ -38,7 +38,7 @@
                 "ssm:DeleteParameters"
             ],
             "Resource": [
-                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/*"
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter<SSM_PARAMETER_PATH>*"
             ]
         }
         ,
@@ -57,10 +57,7 @@
                 "lambda:RemovePermission"
             ],
             "Resource": [
-                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<EXECUTOR_LAMBDA_NAME>",
-                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<WORKER_LAMBDA_NAME>",
-                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<NOTIFIER_LAMBDA_NAME>",
-                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<INTERACTOR_LAMBDA_NAME>"
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:Factorio*"
             ]
         }
         ,
@@ -91,17 +88,13 @@
                 "iam:CreateRole",
                 "iam:DeleteRole",
                 "iam:AttachRolePolicy",
-                "iam:DetachRolePolicy"
+                "iam:DetachRolePolicy",
+                "iam:PutRolePolicy",
+                "iam:DeleteRolePolicy"
             ],
             "Resource": [
-                "arn:aws:iam::<ACCOUNT_ID>:policy/<INTERACT_POLICY_NAME>",
-                "arn:aws:iam::<ACCOUNT_ID>:policy/<EXECUTE_POLICY_NAME>",
-                "arn:aws:iam::<ACCOUNT_ID>:policy/<NOTIFY_POLICY_NAME>",
-                "arn:aws:iam::<ACCOUNT_ID>:policy/<SERVER_POLICY_NAME>",
-                "arn:aws:iam::<ACCOUNT_ID>:policy/<REGIST_POLICY_NAME>",
-                "arn:aws:iam::<ACCOUNT_ID>:policy/<WORK_POLICY_NAME>",
-                "arn:aws:iam::<ACCOUNT_ID>:role/FactorioLambdaRole*",
-                "arn:aws:iam::<ACCOUNT_ID>:role/FactorioSchedulerRole*"
+                "arn:aws:iam::<ACCOUNT_ID>:policy/Factorio*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/Factorio*"
             ]
         },
         {

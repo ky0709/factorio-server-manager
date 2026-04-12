@@ -73,7 +73,7 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
   - `Lambda/`: `Interactor`（受付）、`Executor`（実行）、`Notifier`（通知）のソースコード
 - `docs/`: 開発ロードマップ等
 - `scripts/`: 管理・設定用スクリプト
-  - `init_aws_resources.sh`: AWSリソース（S3, DynamoDB, IAM, Lambda）の「器」を一括作成
+  - `init_aws_resources.py`: AWSリソース（S3, DynamoDB, IAM, Lambda）の「器」を一括作成
   - `cleanup_aws_resources.sh`: 作成したAWSリソースを完全に削除
   - `setup_config.py`: `.env` の値を使用して IAM ポリシーのテンプレートを生成
   - `register.py`: Discordコマンドの登録および機密情報（SSM）の同期
@@ -81,7 +81,14 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 - `.env`: ローカル環境用の認証情報およびAWS同期用設定（Git管理対象外）
 - `requirements.txt`: ローカル環境用ライブラリ
 
-## 🆕 開発者向けセットアップ・チェックリスト
+## 🏷 リソースの命名規則
+本プロジェクトでは、最小権限の原則に基づき、管理用ポリシー（`FactorioRegistPolicy`）で操作可能なリソースを名前の前方一致で制限しています。`.env` で独自の名前を設定する場合は、以下の接頭辞を維持してください。
+
+- **S3 バケット**: `factorio-` で始まる必要があります（例: `factorio-storage-xxx`）。
+- **DynamoDB / Lambda / IAM**: `Factorio` で始まる必要があります（例: `FactorioState`, `Factorio_Executor`）。
+- **EventBridge / Scheduler**: 自動的に `Factorio-` 接頭辞が付与されます。
+
+## � 開発者向けセットアップ・チェックリスト
 新規に環境を構築する際は、以下の項目を順に完了させてください。
 
 ### 1. Discord 側の準備
@@ -107,7 +114,7 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 
 ### 4. 初期デプロイフロー
 - [ ] `python scripts/check_env_leaks.py <env>` を実行し、機密情報の漏洩がないか確認する
-- [ ] `scripts/init_aws_resources.sh <env>` を実行して、AWS上にリソースの器を作成する
+- [ ] `python scripts/init_aws_resources.py <env>` を実行して、AWS上にリソースの器を作成する
 - [ ] `python scripts/setup_config.py` を実行して、環境に合わせた IAM ポリシーファイルを生成する
 - [ ] `python scripts/deploy_policies.py` を実行して、AWS 上に IAM ポリシーをデプロイする
 - [ ] `python scripts/update_layer.py` を実行して、共通モジュール (Lambda Layer) をデプロイする
@@ -126,7 +133,7 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 5. **[ローカル]** `python scripts/check_env_leaks.py <env>` を実行し、Git履歴に機密情報が含まれていないか確認する。
 
 ### 2. AWS：インフラリソースの構築
-1. **[ローカル]** `scripts/init_aws_resources.sh <env>` を実行し、S3, DynamoDB, IAM Role, EventBridge, Lambda の器を自動作成する。
+1. **[ローカル]** `python scripts/init_aws_resources.py <env>` を実行し、S3, DynamoDB, IAM Role, EventBridge, Lambda の器を自動作成する。
 2. **[ローカル]** `python scripts/setup_config.py <env>` を実行して、環境に合わせた実際の IAM ポリシーファイルをローカルに生成する。
 3. **[ローカル]** `python scripts/deploy_policies.py <env>` を実行して、生成したポリシーを AWS へ適用する。
 
