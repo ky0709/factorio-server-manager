@@ -7,12 +7,12 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 
 | コマンド | 概要 | 権限 |
 | :--- | :--- | :--- |
-| `/start` | サーバー（EC2）の起動と起動確認 | 管理者/一般 |
+| `/start` | サーバー（EC2）の起動・パスワード自動生成・起動確認 | 管理者/一般 |
 | `/stop` | 安全な停止シーケンス（セーブ・マウント解除・EC2停止） | 管理者/一般 |
 | `/status` | IPアドレス、プレイヤー数、セーブ同期状態の確認 | 全員 |
 | `/restore` | セーブ履歴の表示 (`list`) およびデータの復元 (`select`) | `select`は管理者のみ |
 | `/save` | 現在のゲーム状態を即時セーブ | 管理者/一般 |
-| `/pass` | 参加用パスワードの表示 | 全員 |
+| `/pass` | 参加用パスワードの表示（マスク表示・本人限定） | 全員 |
 
 > [!IMPORTANT]
 > 各コマンドの引数や詳細な挙動、権限設定については docs/command_reference.md を参照してください。
@@ -23,7 +23,8 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 - **サーバーレスな管理レイヤー**: Discordからのリクエストを AWS Lambda + API Gateway で直接処理するため、Factorioゲームサーバーの**管理に常駐サーバーは不要**です。Factorioゲームサーバー自体はEC2インスタンス上で動作します。
 - **4層分離アーキテクチャ**: 責務を「受付（Interactor）」「実行（Executor）」「履歴・監視（Worker）」「通知（Notifier）」に分離。スケーラビリティと保守性を高め、Discordの応答制限（3秒ルール）を完全に回避します。
 - **多重系の停止ロジック (Robust Shutdown)**: 無人検知と定時停止を組み合わせた堅牢なコスト最適化に加え、OSレベルの `_netdev` 制御と Lambda からの **Lazy Unmount** 命令による二段構えの保護を実装。ネットワーク切断時の OS フリーズや NFS ハングアップを徹底的に排除したクリーンシャットダウンを実現しています。
-- **高度なセキュリティと権限管理**: Discord署名検証（Ed25519）に加え、SSM管理された管理者ID/ロールによるコマンド実行制限（デフォルト：`/restore select`）を実装。制限対象は `.env` の `RESTRICTED_COMMAND_STRINGS` で自由に変更可能で、設定されたコマンドには Discord 上の説明文に自動的に「[管理者限定]」のタグが付与されます。
+- **高度なセキュリティと権限管理**: Discord署名検証（Ed25519）に加え、管理者ID/ロールによるコマンド実行制限を実装。さらに、**サーバー起動ごとのランダムパスワード自動生成**機能を搭載し、セキュリティを大幅に強化。
+- **ユーザビリティの向上**: パスワードは Discord 上でマスク（スポイラー）表示され、IP アドレスやバージョン ID はタップ/クリックで簡単にコピーできるようコードブロック形式で出力されます。
 - **機密情報の自動同期**: ローカルの `.env` に記載した機密情報を、コマンド登録時に AWS SSM へ自動的に同期・アップロードします。
 - **簡易なセーブデータ管理**: `/save` コマンドによる手動セーブ、`/restore` コマンドによるS3バージョニングを活用した過去データへの復元が可能です。
 - **Amazon S3 Files (s3files-utils) によるコスト効率と機能性**: 
@@ -34,7 +35,7 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
   - **既存アプリとの完全互換**: ゲームサーバー本体に一切の変更を加えず、標準のローカルディレクトリとして透過的に利用可能。
 
 - **データ整合性と可視化**: 停止時に `Factorio停止` -> `カタログ更新` -> `アンマウント` -> `EC2停止` を自動実行。S3への反映待ち状態（同期中）をリアルタイムで検知し、`/status` や `/restore list` に表示することで、データ喪失を防ぎます。
-- **自動テスト環境**: `test_runner.py` により、各LambdaのロジックやAWSリソースとの疎通を網羅的に検証可能。テスト結果はDiscordのログチャットへ自動レポートされます。
+- **自動テスト環境とログ**: `test_runner.py` により、各LambdaのロジックやAWSリソースとの疎通を網羅的に検証可能。テスト結果やインフラの稼働状態は、Discordのログチャットへリアルタイムにレポートされます。
 
 ## 🏗 システム構成
 1. **Discord User**: `/start` / `/stop` / `/status` コマンドを実行
@@ -73,11 +74,12 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
   - `Lambda/`: `Interactor`（受付）、`Executor`（実行）、`Notifier`（通知）のソースコード
 - `docs/`: 開発ロードマップ等
 - `scripts/`: 管理・設定用スクリプト
+  - `deploy_all.py`: 全リソース（ポリシー、Layer、Lambda）の一括デプロイおよび設定同期
   - `init_aws_resources.py`: AWSリソース（S3, DynamoDB, IAM, Lambda）の「器」を一括作成
   - `cleanup_aws_resources.sh`: 作成したAWSリソースを完全に削除
   - `setup_config.py`: `.env` の値を使用して IAM ポリシーのテンプレートを生成
   - `register.py`: Discordコマンドの登録および機密情報（SSM）の同期
-  - `check_env_leaks.py`: Git履歴内の機密情報漏洩をスキャン
+  - `check_env_leaks.py`: Git履歴内の機密情報漏洩スキャン（関数名等の偽陽性を除外するフィルタリング機能付き）
 - `.env`: ローカル環境用の認証情報およびAWS同期用設定（Git管理対象外）
 - `requirements.txt`: ローカル環境用ライブラリ
 
@@ -114,12 +116,9 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 
 ### 4. 初期デプロイフロー
 - [ ] `python scripts/check_env_leaks.py <env>` を実行し、機密情報の漏洩がないか確認する
-- [ ] `python scripts/init_aws_resources.py <env>` を実行して、AWS上にリソースの器を作成する
+- [ ] `python scripts/init_aws_resources.py <env>` を実行して、AWS上にベースリソースを作成する
 - [ ] `python scripts/setup_config.py` を実行して、環境に合わせた IAM ポリシーファイルを生成する
-- [ ] `python scripts/deploy_policies.py` を実行して、AWS 上に IAM ポリシーをデプロイする
-- [ ] `python scripts/update_layer.py` を実行して、共通モジュール (Lambda Layer) をデプロイする
-- [ ] `python scripts/deploy_lambda.py` を実行して、Lambda 関数をデプロイする
-- [ ] `python scripts/register.py` を実行して、Discord コマンドの登録と SSM への機密情報同期を行う
+- [ ] `python scripts/deploy_all.py <env>` を実行して、全コンポーネントをデプロイする
 - [ ] `python scripts/test_runner.py` を実行して、システム全体の疎通を確認する
 
 ---
@@ -147,11 +146,16 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 > EC2 および S3 Files の具体的なセットアップ手順については docs/ec2_setup_reference.md を参照してください。
 
 ## 🚀 デプロイ
-リソースの器が作成されたら、以下のスクリプトでコードと設定を反映させます。
-1. **[ローカル]** `python scripts/update_layer.py <env>` を実行し、共通ユーティリティをデプロイ。
-2. **[ローカル]** `python scripts/deploy_lambda.py <env>` を実行し、全 Lambda 関数をデプロイ。
-3. **[ローカル]** `python scripts/register.py <env>` を実行し、Discord コマンド登録と機密情報 (SSM) の同期を行う。
-4. **[ローカル]** `python scripts/test_runner.py <env>` を実行して、疎通を確認。
+以下のコマンドで、全てのコード、ポリシー、設定、Discordコマンドを最新の状態に更新できます。
+1. **[ローカル]** `python scripts/deploy_all.py <env>` を実行。
+2. **[ローカル]** `python scripts/test_runner.py <env>` を実行して、正常動作を確認。
+
+## ⚙️ 設定の変更方法
+無人停止時間や権限設定などを変更したい場合は、以下の手順で行います。
+1. **`.env` の修正**: ローカルの `.env` ファイル内の該当する変数を書き換えます。
+2. **再デプロイ**: `python scripts/deploy_all.py <env>` を実行します。
+   - これにより、Lambda の環境変数、EventBridge のスケジュール、SSM パラメータ、IAM ポリシーが最新の状態に更新されます。
+3. **反映の確認**: `/status` コマンドや実際の挙動で変更が適用されたことを確認します。
 
 ## ⚠️ 運用上の注意
 - **メンテナンス時の自動停止**: 

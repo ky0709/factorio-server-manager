@@ -234,6 +234,7 @@ def register_commands():
 
 def sync_secrets_to_ssm():
     print("\n--- Syncing Secrets to AWS SSM Parameter Store ---")
+    has_error = False
     try:
         ssm = boto3.client(
             'ssm',
@@ -248,10 +249,17 @@ def sync_secrets_to_ssm():
         for env_key, ssm_path in SECRETS_TO_SYNC.items():
             value = os.getenv(env_key)
             
-            if not value:
-                if env_key == 'DISCORD_WEBHOOK_URL':
-                    print(f"⚠️  Skip: {env_key} is not defined in .env")
-                continue
+            # .envにキーが存在しない、または値が空の場合の処理
+            if value is None or not value.strip():
+                # GAME_PASSWORD が空の場合は、Lambda側でのランダム生成を誘発するために
+                # スペースを同期対象として継続する（SSMは空文字を許容しないため）
+                if env_key == 'GAME_PASSWORD':
+                    value = " "
+                else:
+                    # それ以外の変数は従来通りスキップ
+                    if env_key == 'DISCORD_WEBHOOK_URL' and value is None:
+                        print(f"⚠️  Skip: {env_key} is not defined in .env")
+                    continue
 
             print(f"🔄 Syncing {env_key} to {ssm_path}...")
             ssm.put_parameter(
@@ -262,6 +270,9 @@ def sync_secrets_to_ssm():
                 Overwrite=True
             )
             print(f"✅ Successfully synced {env_key}")
+            
+            # スロットリング防止のために短い待機を入れる
+            time.sleep(0.2)
 
         # --- Lambda キャッシュのリフレッシュ ---
         print("\n--- Refreshing Lambda Caches ---")
@@ -297,13 +308,19 @@ def sync_secrets_to_ssm():
 
     except (NoCredentialsError, PartialCredentialsError):
         print("❌ Error: AWS credentials not found. Please run 'aws configure'.")
+        has_error = True
     except ClientError as e:
         if e.response['Error']['Code'] == 'AccessDeniedException':
             print(f"❌ Error: Access denied. Check your IAM permissions for ssm:PutParameter.")
         else:
             print(f"❌ AWS Error: {e}")
+        has_error = True
     except Exception as e:
         print(f"❌ Unexpected Error: {e}")
+        has_error = True
+
+    if has_error:
+        sys.exit(1)
 
 if __name__ == "__main__":
     register_commands()

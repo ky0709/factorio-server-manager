@@ -2,6 +2,8 @@ import json
 import os
 import re
 import time
+import secrets
+import string
 from datetime import datetime
 
 # レイヤーからのインポート
@@ -85,7 +87,7 @@ def handle_status(event, ec2, inst, state, ip, locale):
                     start_time_str = res_start['Item'].get('Timestamp')
                     if start_time_str:
                         elapsed = int(time.time() - float(start_time_str))
-                        return get_msg("status", "starting", locale, elapsed=elapsed, save_time=save_time, size=save_size)
+                        return get_msg("status", "starting", locale, elapsed=elapsed, save_time=save_time, size=save_size, ip=ip, port=config.get('factorio_game_port', 34197))
         except Exception as e:
             print(f"In-progress check error: {e}")
 
@@ -153,10 +155,38 @@ def handle_status(event, ec2, inst, state, ip, locale):
 
 def handle_start(event, ec2, inst, state, ip, locale):
         if state == 'stopped':
-            start_process_time = time.time()
+            # 1. パスワードの取得または生成
+            # SSMにあるのは「設定（固定か空か）」、DynamoDBに保存するのが「現在のセッション用」と分離します
+            new_pwd = (config.get('game_password') or "").strip("'\" ")
 
+            if not new_pwd or "your_in_game" in new_pwd:
+                # 設定が空の場合はランダム生成
+                chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+                new_pwd = ''.join(secrets.choice(chars) for _ in range(12))
+            
+            # 2. 現在のパスワードを DynamoDB に「セッションパスワード」として保存
+            # これにより SSM を汚さず、起動のたびに new_pwd が生成される条件(空)を維持できる
+            try:
+                factorio_state_table.update_item(
+                    Key={'ConfigKey': 'ActivePassword'},
+                    UpdateExpression="set #val = :v",
+                    ExpressionAttributeNames={'#val': 'Value'},
+                    ExpressionAttributeValues={':v': new_pwd}
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to cache active password to DynamoDB: {e}")
+
+            start_process_time = time.time()
             # 以前の停止処理マーカーが残っている可能性があるため強制削除
             factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
+
+            # 無人停止カウントおよびRCON無応答カウントをリセット
+            try:
+                factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                factorio_state_table.update_item(Key={'ConfigKey': 'OfflineCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                print("ℹ️ Counters (ZeroPlayerCount, OfflineCount) reset for new session.")
+            except Exception as e:
+                print(f"⚠️ Failed to reset counters: {e}")
 
             # イベント検知時の経過時間算出用に開始時刻を記録
             factorio_state_table.update_item(
@@ -181,20 +211,25 @@ def handle_start(event, ec2, inst, state, ip, locale):
                 if current_ip:
                     check = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], "/version")
                     if "Error" not in check:
+                        # 3. 起動完了後、RCON経由でゲーム内パスワードを適用
+                        pwd_res = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], f"/config set password {new_pwd}")
+                        
+                        # パスワード設定の成否をログに記録 (失敗時のみ通知)
+                        if "Error" in pwd_res or "Unknown" in pwd_res:
+                            notify(f"⚠️ [LOG] Failed to apply game password via RCON: {pwd_res}", mode='log')
+                        
                         elapsed = int(time.time() - start_process_time)
-                        # ログチャットに詳細な起動時間を通知
-                        notify(f"🚀 [LOG] Factorio server is ready on {current_ip}:{config.get('factorio_game_port', 34197)}. (Time taken: {elapsed}s)", mode='log')
+                        notify(f"🚀 [LOG] Factorio server is ready (Time: {elapsed}s)", mode='log')
                         
                         # 起動が確認できたので、ステータス表示用の起動マーカーを削除
                         factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
 
-                        # パスワードとポート情報を取得して完了メッセージを生成
-                        pwd = config.get("game_password", "-")
+                        # 生成した新パスワードとポート情報を取得して完了メッセージを生成
                         port = config.get('factorio_game_port', 34197)
                         return {
                             "embeds": [{
                                 "title": get_msg("start", "completed_title", locale),
-                                "description": get_msg("start", "completed", locale, ip=current_ip, port=port, pwd=pwd),
+                                "description": get_msg("start", "completed", locale, ip=current_ip, port=port, pwd=new_pwd),
                                 "color": COLOR_GREEN
                             }]
                         }
@@ -253,6 +288,12 @@ def handle_stop(event, ec2, inst, state, ip, locale):
             # 4. EC2停止
             ec2.stop_instances(InstanceIds=[config['instance_id']])
             
+            # 5. セッションパスワードのクリア
+            try:
+                factorio_state_table.delete_item(Key={'ConfigKey': 'ActivePassword'})
+            except Exception as e:
+                print(f"⚠️ Failed to clear active password: {e}")
+
             # 6. メインチャットへの完了報告 (これによって Interactor のメッセージが PATCH される)
             return get_msg("stop", "process_stopped", locale)
         return get_msg("stop", "already", locale)
@@ -275,8 +316,38 @@ def handle_save(event, ec2, inst, state, ip, locale):
         return get_msg("save", "success", locale)
 
 def handle_pass(event, ec2, inst, state, ip, locale):
+    # 1. 停止中、または停止処理中の判定
+    if state == 'stopped':
+        return get_msg("common", "server_offline", locale)
+
+    try:
+        # インスタンスが動いていても、停止マーカーがある場合はオフライン扱いにする
+        res_stop = factorio_state_table.get_item(Key={'ConfigKey': 'StopStartTime'})
+        if 'Item' in res_stop:
+            return get_msg("common", "server_offline", locale)
+    except: pass
+
+    # 2. DynamoDBから「現在のセッションで有効なパスワード」を取得する
+    try:
+        res = factorio_state_table.get_item(Key={'ConfigKey': 'ActivePassword'})
+        pwd = res.get('Item', {}).get('Value')
+    except Exception as e:
+        print(f"⚠️ Failed to fetch active password from DynamoDB: {e}")
         pwd = config.get("game_password")
-        return get_msg("pass", "display", locale, pwd=pwd) if pwd else get_msg("pass", "not_set", locale)
+
+    pwd = (pwd or "").strip("'\" ")
+    if not pwd:
+        return get_msg("pass", "not_set", locale)
+
+    # 3. 起動処理中の判定
+    try:
+        res_start = factorio_state_table.get_item(Key={'ConfigKey': 'StartStartTime'})
+        if 'Item' in res_start:
+            # パスワードは表示しつつ、準備中であることを伝える
+            return get_msg("pass", "starting", locale, pwd=pwd)
+    except: pass
+
+    return get_msg("pass", "display", locale, pwd=pwd)
 
 def handle_license(event, ec2, inst, state, ip, locale):
         return {

@@ -3,29 +3,10 @@ import re
 from datetime import datetime
 
 # レイヤーからのインポート
-from factorio_common.utils import JST, get_client, fetch_config_from_ssm, run_rcon_command, format_msg, notify_via_lambda
-
-TEXT_RESOURCES = {
-    "restore": {
-        "pending_warning": {"ja": "⚠️ **注意: {time} に実行された最新のセーブはまだ S3 に反映されていない可能性があります。**\n", "en": "⚠️ **Note: Latest save at {time} may not be in S3 yet.**\n"},
-        "not_found": {"ja": "📁 {date} のセーブデータが見つかりませんでした。", "en": "📁 No save found for {date}."},
-        "list_header": {"ja": "📁 **{date} の履歴 {count_info}**\n", "en": "📁 **History for {date} {count_info}**\n"},
-        "list_footer": {"ja": "\n\n`/restore select version_id: <ID>` で復元可能です。", "en": "\n\nRestore via `/restore select version_id: <ID>`."},
-        "stop_required": {"ja": "❌ 復元前にサーバーを停止してください。", "en": "❌ Stop the server before restoring."},
-        "complete": {"ja": "✅ セーブデータの復元が完了しました。\n作成日時: `{date}`\n対象バージョン: `{id}`", "en": "✅ Restore complete.\nCreated at: `{date}`\nVersion ID: `{id}`"},
-        "failed": {"ja": "❌ 復元失敗: {err}", "en": "❌ Restore failed: {err}"},
-        "syncing": {
-            "ja": "⏳ (S3同期中...) ",
-            "en": "⏳ (S3 Syncing...) "
-        },
-        "auto_shutdown": {"ja": "⌛ {duration}分無人状態が続いたため、サーバーを停止します。", "en": "⌛ Stopping server due to {duration} minutes of inactivity."},
-        "rcon_unresponsive": {"ja": "⚠️ [LOG] RCONが無応答です。サーバーを再起動します...", "en": "⚠️ [LOG] RCON is unresponsive. Restarting server..."},
-        "truncated": {"ja": "\n... (履歴が多いため、一部を省略しました)", "en": "\n... (Some items were omitted due to length limits)"}
-    }
-}
+from factorio_common.utils import JST, get_client, fetch_config_from_ssm, run_rcon_command, format_msg, notify_via_lambda, GLOBAL_TEXT_RESOURCES
 
 def get_msg(category, key, locale='ja', **kwargs):
-    return format_msg(TEXT_RESOURCES, category, key, locale, **kwargs)
+    return format_msg(GLOBAL_TEXT_RESOURCES, category, key, locale, **kwargs)
 
 config = {"initialized": False}
 
@@ -122,7 +103,7 @@ def handle_restore(event):
         for v in versions_to_show:
             ts = v['LastModified'].astimezone(JST)
             sz = round(v['Size'] / (1024 * 1024), 1)
-            v_list.append(f"- `{ts.strftime('%H:%M:%S')}` (`{sz}MB`) ID: `{v['VersionId']}`")
+            v_list.append(f"### {ts.strftime('%H:%M:%S')} ({sz}MB) 🆔 `{v['VersionId']}`")
         
         if not v_list: return get_msg("restore", "not_found", locale, date=display_date), None # No items found
 
@@ -204,7 +185,7 @@ def handle_auto_check(event):
         off_count = mock.get('offline_count', factorio_state_table.get_item(Key={'ConfigKey': 'OfflineCount'}).get('Item', {}).get('CountValue', 0)) + 1
         if off_count >= int(config.get('rcon_unresponsive_threshold', 2)):
             if test_mode: return {"action": "restart_triggered", "reason": "RCON unresponsive"}
-            notify(get_msg("restore", "rcon_unresponsive", locale), mode='log')
+            notify(get_msg("worker_specific", "rcon_unresponsive", locale), mode='log')
             get_client('ssm').send_command(InstanceIds=[config['instance_id']], DocumentName="AWS-RunShellScript", Parameters={'commands': ["sudo systemctl restart factorio"]})
             off_count = 0
         if test_mode: return {"action": "count_offline", "current": off_count}
@@ -221,11 +202,11 @@ def handle_auto_check(event):
                 
                 # 停止理由の詳細をログチャットに通知
                 duration_mins = threshold * 5 # 5分間隔のチェックを想定
-                log_msg = f"🔌 [LOG] Auto-shutdown triggered. Reason: 0 players detected for {duration_mins} minutes."
+                log_msg = "🔌 [LOG] Auto-shutdown triggered. Reason: The server has been unattended for a certain period of time."
                 notify(log_msg, mode='log')
                 
-                get_client('lambda').invoke(FunctionName=config['executor_lambda_name'], InvocationType='Event', Payload=json.dumps({'action': 'stop'}))
-                notify(get_msg("restore", "auto_shutdown", locale, duration=duration_mins), mode='webhook')
+                get_client('lambda').invoke(FunctionName=config['executor_lambda_name'], InvocationType='Event', Payload=json.dumps({'action': 'stop', 'locale': locale})) # localeを渡す
+                notify(get_msg("worker_specific", "auto_shutdown", locale, duration=duration_mins), mode='webhook')
                 z_count = 0
             if test_mode: return {"action": "count_zero_players", "current": z_count}
             factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': z_count})

@@ -15,8 +15,8 @@ GLOBAL_TEXT_RESOURCES = {
     },
     "status": {
         "running": {
-            "ja": "✅ **稼働中**\n- 接続先: `{ip}:{port}`\n- オンライン: `{players}`名 (`{names}`)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
-            "en": "✅ **Running**\n- Address: `{ip}:{port}`\n- Online: `{players}` (`{names}`)\n- Last Save: `{save_time}` (`{size}`MB)"
+            "ja": "✅ **稼働中**\n### 📍 接続先: `{ip}:{port}`\n- オンライン: `{players}`名 (`{names}`)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
+            "en": "✅ **Running**\n### 📍 Address: `{ip}:{port}`\n- Online: `{players}` (`{names}`)\n- Last Save: `{save_time}` (`{size}`MB)"
         },
         "stopped": {
             "ja": "🔴 **停止中**\n- 最終セーブ: `{save_time}` (`{size}`MB)",
@@ -24,8 +24,8 @@ GLOBAL_TEXT_RESOURCES = {
         },
         "transition": {"ja": "⏳ **状態遷移中** (`{state}`)", "en": "⏳ **Transitioning** (`{state}`)"},
         "starting": {
-            "ja": "⏳ **起動処理中** (経過時間: `{elapsed}`秒)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
-            "en": "⏳ **Starting Process** (Elapsed: `{elapsed}`s)\n- Last Save: `{save_time}` (`{size}`MB)"
+            "ja": "⏳ **起動処理中** (経過時間: `{elapsed}`秒)\n### 📍 接続先 (準備中): `{ip}:{port}`\n- 最終セーブ: `{save_time}` (`{size}`MB)",
+            "en": "⏳ **Starting Process** (Elapsed: `{elapsed}`s)\n### 📍 Address (Preparing): `{ip}:{port}`\n- Last Save: `{save_time}` (`{size}`MB)"
         },
         "stopping": {
             "ja": "⏳ **停止処理中** (経過時間: `{elapsed}`秒)\n- 最終セーブ: `{save_time}` (`{size}`MB)",
@@ -40,8 +40,8 @@ GLOBAL_TEXT_RESOURCES = {
         "success": {"ja": "🚀 サーバーの起動を開始しました。", "en": "🚀 Starting server..."},
         "already": {"ja": "⚠️ サーバーは既に起動しているか、準備中です。", "en": "⚠️ Server is already running or pending."},
         "completed": {
-            "ja": "- 接続先: `{ip}:{port}`\n- パスワード: `{pwd}`",
-            "en": "- Address: `{ip}:{port}`\n- Password: `{pwd}`"
+            "ja": "### 📍 接続先: `{ip}:{port}`\n### 🔑 パスワード: `{pwd}`",
+            "en": "### 📍 Address: `{ip}:{port}`\n### 🔑 Password: `{pwd}`"
         },
         "completed_title": {
             "ja": "✨ Factorio サーバー起動完了",
@@ -59,7 +59,11 @@ GLOBAL_TEXT_RESOURCES = {
     },
     "pass": {
         "not_set": {"ja": "❌ パスワードは設定されていません。", "en": "❌ Password is not set."},
-        "display": {"ja": "🔑 パスワード: `{pwd}`", "en": "🔑 Password: `{pwd}`"}
+        "display": {"ja": "### 🔑 パスワード: `{pwd}`", "en": "### 🔑 Password: `{pwd}`"},
+        "starting": {
+            "ja": "⏳ **サーバー起動中です。まもなく利用可能になります。**\n### 🔑 パスワード: `{pwd}`",
+            "en": "⏳ **Server is starting. It will be available shortly.**\n🔑 Password: ###`{pwd}`"
+        }
     },
     "license": {
         "content": {
@@ -73,7 +77,7 @@ GLOBAL_TEXT_RESOURCES = {
         "list_header": {"ja": "📁 **{date} の履歴 {count_info}**\n", "en": "📁 **History for {date} {count_info}**\n"},
         "list_footer": {"ja": "\n\n`/restore select version_id: <ID>` で復元可能です。", "en": "\n\nRestore via `/restore select version_id: <ID>`."},
         "stop_required": {"ja": "❌ 復元前にサーバーを停止してください。", "en": "❌ Stop the server before restoring."},
-        "complete": {"ja": "✅ セーブデータの復元が完了しました。\n作成日時: `{date}`\n対象バージョン: `{id}`", "en": "✅ Restore complete.\nCreated at: `{date}`\nVersion ID: `{id}`"},
+        "complete": {"ja": "✅ セーブデータの復元が完了しました。\n作成日時: {date}\n対象バージョン: `{id}`", "en": "✅ Restore complete.\nCreated at: {date}\nVersion ID: `{id}`"},
         "failed": {"ja": "❌ 復元失敗: {err}", "en": "❌ Restore failed: {err}"},
         "syncing": {
             "ja": "⏳ (S3同期中...) ",
@@ -81,7 +85,14 @@ GLOBAL_TEXT_RESOURCES = {
         },
         "truncated": {"ja": "\n... (履歴が多いため、一部を省略しました)", "en": "\n... (Some items were omitted due to length limits)"}
     }
+    ,
+    "worker_specific": { # Worker固有のメッセージをここにまとめる (例: auto_shutdown, rcon_unresponsive)
+        "auto_shutdown": {"ja": "⌛ 無人状態が一定時間続いたため、サーバーを停止しました。", "en": "⌛ Stopping server as it has been unattended for a certain period of time."},
+        "rcon_unresponsive": {"ja": "⚠️ [LOG] RCONが無応答です。サーバーを再起動します...", "en": "⚠️ [LOG] RCON is unresponsive. Restarting server..."}
+    }
 }
+
+
 
 # クライアントのキャッシュ用
 _clients = {}
