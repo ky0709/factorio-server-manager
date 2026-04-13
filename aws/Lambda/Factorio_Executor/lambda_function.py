@@ -16,9 +16,13 @@ COLOR_GREEN, COLOR_BLUE = 0x2ECC71, 0x3498DB
 
 config = {"initialized": False}
 factorio_state_table = None
+_suppressed_logs = []
 
 def init_config():
     try:
+        global _suppressed_logs
+        _suppressed_logs = []
+
         ssm_config = fetch_config_from_ssm()
         if not ssm_config:
             print(f"⚠️ Warning: No config found in SSM. Check SSM_PARAMETER_PATH: {os.getenv('SSM_PARAMETER_PATH')}")
@@ -39,8 +43,28 @@ def notify(content, mode='followup', event=None, embeds=None, components=None):
     # テストモード時は Discord への通知処理をスキップ
     notifier_name = config.get('notifier_lambda_name')
     if config.get("test_mode"):
+        if content:
+            _suppressed_logs.append(content)
         print(f"DEBUG: [Test Mode] Notification suppressed: {content}")
         return
+
+    # グローバルなテストセッションフラグをチェック
+    if factorio_state_table:
+        try:
+            res = factorio_state_table.get_item(Key={'ConfigKey': 'TestSessionActive'})
+            item = res.get('Item')
+            if item:
+                # 有効期限が設定されており、かつ期限が切れている場合はフラグを無視
+                exp = item.get('ExpiresAt')
+                if exp and int(exp) < int(time.time()):
+                    print("DEBUG: [Global Test Session] Flag expired, ignoring.")
+                else:
+                    if content:
+                        _suppressed_logs.append(content)
+                    print(f"DEBUG: [Global Test Session] Notification suppressed: {content}")
+                    return
+        except Exception as e:
+            print(f"⚠️ Failed to check global test flag: {e}")
 
     if not notifier_name:
         print(f"⚠️ Cannot notify: notifier_lambda_name is missing. Content: {content}")
@@ -180,6 +204,15 @@ def handle_start(event, ec2, inst, state, ip, locale):
             # 以前の停止処理マーカーが残っている可能性があるため強制削除
             factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
 
+            # 各種カウントをリセット
+            try:
+                factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                factorio_state_table.update_item(Key={'ConfigKey': 'OfflineCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                factorio_state_table.update_item(Key={'ConfigKey': 'AutoRestartCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                print("ℹ️ Counters reset for new session.")
+            except Exception as e:
+                print(f"⚠️ Failed to reset counters: {e}")
+
             # 無人停止カウントおよびRCON無応答カウントをリセット
             try:
                 factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
@@ -291,6 +324,10 @@ def handle_stop(event, ec2, inst, state, ip, locale):
             # 5. セッションパスワードのクリア
             try:
                 factorio_state_table.delete_item(Key={'ConfigKey': 'ActivePassword'})
+                # 停止時にもカウントをリセット
+                factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                factorio_state_table.update_item(Key={'ConfigKey': 'OfflineCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                factorio_state_table.update_item(Key={'ConfigKey': 'AutoRestartCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
             except Exception as e:
                 print(f"⚠️ Failed to clear active password: {e}")
 
@@ -396,6 +433,12 @@ def lambda_handler(event, context):
     if event.get('source') == 'aws.ec2' and event.get('detail-type') == 'EC2 Instance State-change Notification':
         detail = event.get('detail', {})
         instance_id = detail.get('instance-id') or detail.get('instanceId') or ''
+
+        # グローバルテストフラグのチェックを関数化
+        is_suppressed = False
+        if factorio_state_table:
+            res = factorio_state_table.get_item(Key={'ConfigKey': 'TestSessionActive'})
+            if 'Item' in res: is_suppressed = True
         
         # state が辞書形式 {'name': 'stopped'} か、文字列 "stopped" かを判定して取得
         raw_state = detail.get('state')
@@ -428,10 +471,11 @@ def lambda_handler(event, context):
                     if start_time_str:
                         elapsed = int(time.time() - float(start_time_str))
                         elapsed_msg = f" (Total sequence time: {elapsed}s)"
-                    
-                    notify(f"🔌 [LOG] EC2 Instance ({instance_id}) has stopped. Shutdown sequence completed.{elapsed_msg}", mode='log')
+                    msg = f"🔌 [LOG] EC2 Instance ({instance_id}) has stopped. Shutdown sequence completed.{elapsed_msg}"
+                    if is_suppressed: print(f"🔕 [SILENT MODE] Suppressed Notification: {msg}")
+                    else: notify(msg, mode='log')
                     factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
-                    return {"status": "ok"}
+                    return {"status": "ok", "suppressed_msg": msg if is_suppressed else None}
                 elif state_name == 'running':
                     # 起動開始時刻を DynamoDB から取得して経過時間を算出
                     res = factorio_state_table.get_item(Key={'ConfigKey': 'StartStartTime'})
@@ -441,10 +485,11 @@ def lambda_handler(event, context):
                     if start_time_str:
                         elapsed = int(time.time() - float(start_time_str))
                         elapsed_msg = f" (EC2 boot time: {elapsed}s)"
-                    
-                    notify(f"🚀 [LOG] EC2 Instance ({instance_id}) is now running.{elapsed_msg}", mode='log')
+                    msg = f"🚀 [LOG] EC2 Instance ({instance_id}) is now running.{elapsed_msg}"
+                    if is_suppressed: print(f"🔕 [SILENT MODE] Suppressed Notification: {msg}")
+                    else: notify(msg, mode='log')
                     factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
-                    return {"status": "ok"}
+                    return {"status": "ok", "suppressed_msg": msg if is_suppressed else None}
             except Exception as e:
                 print(f"❌ Error processing EC2 state change: {e}")
         
@@ -459,10 +504,12 @@ def lambda_handler(event, context):
     
     # If in test_mode, return the result directly for inspection
     if test_mode:
+        resp = {"suppressed_logs": _suppressed_logs, "mode": notify_mode}
         if isinstance(result, dict): # For embeds
-            return {"content": None, "embeds": result.get('embeds'), "mode": notify_mode}
+            resp.update({"content": None, "embeds": result.get('embeds')})
         else: # For plain text
-            return {"content": result, "embeds": None, "mode": notify_mode}
+            resp.update({"content": result, "embeds": None})
+        return resp
 
     # Discord Interaction (Tokenが存在する) 場合のみ、応答を返す
     if event.get('token'):

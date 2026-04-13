@@ -62,7 +62,7 @@ GLOBAL_TEXT_RESOURCES = {
         "display": {"ja": "### 🔑 パスワード: `{pwd}`", "en": "### 🔑 Password: `{pwd}`"},
         "starting": {
             "ja": "⏳ **サーバー起動中です。まもなく利用可能になります。**\n### 🔑 パスワード: `{pwd}`",
-            "en": "⏳ **Server is starting. It will be available shortly.**\n🔑 Password: ###`{pwd}`"
+            "en": "⏳ **Server is starting. It will be available shortly.**\n### 🔑 Password: `{pwd}`"
         }
     },
     "license": {
@@ -88,7 +88,10 @@ GLOBAL_TEXT_RESOURCES = {
     ,
     "worker_specific": { # Worker固有のメッセージをここにまとめる (例: auto_shutdown, rcon_unresponsive)
         "auto_shutdown": {"ja": "⌛ 無人状態が一定時間続いたため、サーバーを停止しました。", "en": "⌛ Stopping server as it has been unattended for a certain period of time."},
-        "rcon_unresponsive": {"ja": "⚠️ [LOG] RCONが無応答です。サーバーを再起動します...", "en": "⚠️ [LOG] RCON is unresponsive. Restarting server..."}
+        "rcon_unresponsive": {"ja": "⚠️ [ALERT] Factorioプロセスが停止またはハングしている可能性があります。自動再起動を試みます...", "en": "⚠️ [ALERT] Factorio process may be down or hanging. Attempting auto-restart..."},
+        "startup_failed": {"ja": "🚨 [ALERT] サーバー起動開始から一定時間経過しましたが、Factorioプロセスが開始されませんでした。コスト保護のためサーバーを停止します。", "en": "🚨 [ALERT] Factorio process failed to start within the timeout period. Stopping server for cost protection."},
+        "shutdown_failed": {"ja": "🚨 [ALERT] サーバー停止処理の開始から一定時間経過しましたが、EC2インスタンスが停止しません。手動での確認を推奨します。", "en": "🚨 [ALERT] EC2 instance failed to stop within the timeout period after the process was shut down. Manual check is recommended."},
+        "restart_limit_reached": {"ja": "🚫 [CRITICAL] 自動再起動を繰り返しましたが復旧しませんでした。無限ループ防止のため、サーバーを停止します。手動での確認が必要です。", "en": "🚫 [CRITICAL] Multiple auto-restart attempts failed. Stopping server to prevent infinite loop. Manual investigation required."}
     }
 }
 

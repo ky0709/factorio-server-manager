@@ -235,6 +235,7 @@ def register_commands():
 def sync_secrets_to_ssm():
     print("\n--- Syncing Secrets to AWS SSM Parameter Store ---")
     has_error = False
+    has_error = False
     try:
         ssm = boto3.client(
             'ssm',
@@ -270,8 +271,6 @@ def sync_secrets_to_ssm():
                 Overwrite=True
             )
             print(f"✅ Successfully synced {env_key}")
-            
-            # スロットリング防止のために短い待機を入れる
             time.sleep(0.2)
 
         # --- Lambda キャッシュのリフレッシュ ---
@@ -305,6 +304,7 @@ def sync_secrets_to_ssm():
                 print(f"♻️  Forced refresh for {lb}")
             except Exception as e:
                 print(f"⚠️  Could not refresh {lb}: {e}")
+                has_error = True
 
     except (NoCredentialsError, PartialCredentialsError):
         print("❌ Error: AWS credentials not found. Please run 'aws configure'.")

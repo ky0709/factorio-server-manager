@@ -5,14 +5,15 @@ Discordのスラッシュコマンドから、**Amazon S3をファイルシス�
 ## 🎮 日常の運用方法
 Discordのスラッシュコマンドを使用してサーバーを管理します。
 
-| コマンド | 概要 | 権限 |
-| :--- | :--- | :--- |
-| `/start` | サーバー（EC2）の起動・パスワード自動生成・起動確認 | 管理者/一般 |
-| `/stop` | 安全な停止シーケンス（セーブ・マウント解除・EC2停止） | 管理者/一般 |
-| `/status` | IPアドレス、プレイヤー数、セーブ同期状態の確認 | 全員 |
-| `/restore` | セーブ履歴の表示 (`list`) およびデータの復元 (`select`) | `select`は管理者のみ |
-| `/save` | 現在のゲーム状態を即時セーブ | 管理者/一般 |
-| `/pass` | 参加用パスワードの表示（マスク表示・本人限定） | 全員 |
+| コマンド | 概要 |
+| :--- | :--- |
+| `/start` | サーバー（EC2）の起動・パスワード自動生成・起動確認 |
+| `/stop` | 安全な停止シーケンス（セーブ・マウント解除・EC2停止） |
+| `/status` | IPアドレス、プレイヤー数、セーブ同期状態の確認 |
+| `/restore` | セーブ履歴の表示 (`list`) およびデータの復元 (`select`) |
+| `/save` | 現在のゲーム状態を即時セーブ |
+| `/pass` | 参加用パスワードの表示 |
+| `/license` | ライセンス情報の表示 |
 
 > [!IMPORTANT]
 > 各コマンドの引数や詳細な挙動、権限設定については docs/command_reference.md を参照してください。
@@ -22,20 +23,16 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 ## 🛠 特徴
 - **サーバーレスな管理レイヤー**: Discordからのリクエストを AWS Lambda + API Gateway で直接処理するため、Factorioゲームサーバーの**管理に常駐サーバーは不要**です。Factorioゲームサーバー自体はEC2インスタンス上で動作します。
 - **4層分離アーキテクチャ**: 責務を「受付（Interactor）」「実行（Executor）」「履歴・監視（Worker）」「通知（Notifier）」に分離。スケーラビリティと保守性を高め、Discordの応答制限（3秒ルール）を完全に回避します。
-- **多重系の停止ロジック (Robust Shutdown)**: 無人検知と定時停止を組み合わせた堅牢なコスト最適化に加え、OSレベルの `_netdev` 制御と Lambda からの **Lazy Unmount** 命令による二段構えの保護を実装。ネットワーク切断時の OS フリーズや NFS ハングアップを徹底的に排除したクリーンシャットダウンを実現しています。
+- **高信頼なライフサイクル管理と安全な停止シーケンス**: 無人検知や定時停止によるコスト削減に加え、Lambdaが主導する「安全な停止シーケンス」を実装。RCONセーブ、S3同期のカタログ更新、OSレベルのハングアップを防ぐ **Lazy Unmount**、そしてEC2停止を適切な順序で自動制御し、データ破損リスクを徹底的に排除しています。
 - **高度なセキュリティと権限管理**: Discord署名検証（Ed25519）に加え、管理者ID/ロールによるコマンド実行制限を実装。さらに、**サーバー起動ごとのランダムパスワード自動生成**機能を搭載し、セキュリティを大幅に強化。
-- **ユーザビリティの向上**: パスワードは Discord 上でマスク（スポイラー）表示され、IP アドレスやバージョン ID はタップ/クリックで簡単にコピーできるようコードブロック形式で出力されます。
+- **ユーザビリティの向上**: IP アドレス、パスワード、バージョン ID は、タップ/クリックで簡単にコピーできるようコードブロック形式で出力されます。
 - **機密情報の自動同期**: ローカルの `.env` に記載した機密情報を、コマンド登録時に AWS SSM へ自動的に同期・アップロードします。
 - **簡易なセーブデータ管理**: `/save` コマンドによる手動セーブ、`/restore` コマンドによるS3バージョニングを活用した過去データへの復元が可能です。
-- **Amazon S3 Files (s3files-utils) によるコスト効率と機能性**: 
-  従来の EFS や Mountpoint for Amazon S3 の制限を打破し、s3files-utils を用いることで以下の機能を実現しています：
-  - **圧倒的なコスト削減**: EFS と比較してストレージおよびスループットコストを大幅に抑制。
-  - **完全なファイルシステム互換性**: 従来の S3 マウント（例: s3fs-fuse）では不可能だった「ファイルロック」「POSIX 権限」「共有書き込みアクセス」「完全なメタデータ操作」をサポート。
-  - **断続的アクセスの最適化**: Factorio のセーブデータのような「書き込み時のみ高負荷」なパターンに特化したコスト構造。
-  - **既存アプリとの完全互換**: ゲームサーバー本体に一切の変更を加えず、標準のローカルディレクトリとして透過的に利用可能。
-
-- **データ整合性と可視化**: 停止時に `Factorio停止` -> `カタログ更新` -> `アンマウント` -> `EC2停止` を自動実行。S3への反映待ち状態（同期中）をリアルタイムで検知し、`/status` や `/restore list` に表示することで、データ喪失を防ぎます。
-- **自動テスト環境とログ**: `test_runner.py` により、各LambdaのロジックやAWSリソースとの疎通を網羅的に検証可能。テスト結果やインフラの稼働状態は、Discordのログチャットへリアルタイムにレポートされます。
+- **S3 を活用した高信頼・低コストストレージ**: 
+  セーブデータの保存先に S3 を採用。EFS 等と比較して圧倒的な低コストを実現しつつ、S3 バージョニングによる多世代バックアップと、独自の同期検知ロジックによる高いデータ整合性を両立しています。詳細は docs/ec2_setup_reference.md を参照。
+- **柔軟なパスワード管理**: 固定パスワードの継続利用、またはサーバー起動ごとのランダムパスワード自動生成（および RCON 経由の自動適用）を、設定（`.env`）により柔軟に選択可能です。
+- **データ整合性の可視化**: S3への反映待ち状態（同期中）をリアルタイムで検知。`/status` や `/restore list` にて「同期中」ステータスを表示することで、ユーザーがデータの安全性を一目で確認できる環境を提供します。
+- **自動テスト環境とインテリジェントな通知制御**: `test_runner.py` により、各LambdaのロジックやAWSリソースとの疎通を網羅的に検証可能。`--silent` モードを利用することで、DynamoDB上のセッションフラグ（TTL付き）を介して**テスト中の全通知（EventBridge経由のログ含む）を一時的に抑制**し、チャットを汚さずにコンソール上で詳細な動作確認が行えます。
 
 ## 🏗 システム構成
 1. **Discord User**: `/start` / `/stop` / `/status` コマンドを実行
@@ -52,7 +49,8 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 
 ## 🚀 技術スタック
 - **Language**: Python 3.12
-- **Infrastructure**: AWS (Lambda, API Gateway, EC2, IAM, DynamoDB, SSM, EventBridge)
+- **Serverless Infrastructure (管理レイヤー)**: AWS (Lambda, API Gateway, IAM, DynamoDB, SSM, EventBridge)
+- **Managed Target (管理対象)**: AWS EC2 (Factorio サーバー)
 - **Library**:
   - `boto3` (AWS SDK)
   - `PyNaCl` (Signature Verification)
@@ -68,18 +66,23 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 - **git**: バージョン管理および機密情報スキャンに使用。
 - **EC2 IAM ロール**: `aws/IAM/FactorioServerPolicy/policy.json` に基づく S3 バケットへのアクセス権限が付与されていること。
 
-##  フォルダ構成
+## 📁 フォルダ構成
 - `aws/`: AWS関連の設定ファイル
   - `IAM/`: 最小権限の原則（Least Privilege）に基づくポリシー設定（テンプレート `.example` と生成後の `.json`）
-  - `Lambda/`: `Interactor`（受付）、`Executor`（実行）、`Notifier`（通知）のソースコード
+  - `Lambda/`: `Interactor`（受付）、`Executor`（実行）、`Worker`（履歴・監視）、`Notifier`（通知）のソースコード
 - `docs/`: 開発ロードマップ等
 - `scripts/`: 管理・設定用スクリプト
   - `deploy_all.py`: 全リソース（ポリシー、Layer、Lambda）の一括デプロイおよび設定同期
+  - `deploy_lambda.py`: Lambda関数とLayerの個別デプロイ
+  - `deploy_policies.py`: IAMポリシーのAWSへの適用
   - `init_aws_resources.py`: AWSリソース（S3, DynamoDB, IAM, Lambda）の「器」を一括作成
   - `cleanup_aws_resources.sh`: 作成したAWSリソースを完全に削除
   - `setup_config.py`: `.env` の値を使用して IAM ポリシーのテンプレートを生成
   - `register.py`: Discordコマンドの登録および機密情報（SSM）の同期
   - `check_env_leaks.py`: Git履歴内の機密情報漏洩スキャン（関数名等の偽陽性を除外するフィルタリング機能付き）
+  - `test_runner.py`: 各種Lambda関数やAWSリソースの自動テスト実行
+  - `update_eventbridge.py`: EventBridgeスケジュールの設定・更新
+  - `update_layer.py`: 共通処理用のLambda Layerの更新
 - `.env`: ローカル環境用の認証情報およびAWS同期用設定（Git管理対象外）
 - `requirements.txt`: ローカル環境用ライブラリ
 
@@ -90,7 +93,7 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 - **DynamoDB / Lambda / IAM**: `Factorio` で始まる必要があります（例: `FactorioState`, `Factorio_Executor`）。
 - **EventBridge / Scheduler**: 自動的に `Factorio-` 接頭辞が付与されます。
 
-## � 開発者向けセットアップ・チェックリスト
+## ✅ 開発者向けセットアップ・チェックリスト
 新規に環境を構築する際は、以下の項目を順に完了させてください。
 
 ### 1. Discord 側の準備
@@ -118,7 +121,7 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 - [ ] `python scripts/check_env_leaks.py <env>` を実行し、機密情報の漏洩がないか確認する
 - [ ] `python scripts/init_aws_resources.py <env>` を実行して、AWS上にベースリソースを作成する
 - [ ] `python scripts/setup_config.py` を実行して、環境に合わせた IAM ポリシーファイルを生成する
-- [ ] `python scripts/deploy_all.py <env>` を実行して、全コンポーネントをデプロイする
+- [ ] `python scripts/deploy_all.py <env> --silent` を実行して、全コンポーネントをデプロイし、通知を飛ばさずにテストを完走させる
 - [ ] `python scripts/test_runner.py` を実行して、システム全体の疎通を確認する
 
 ---
@@ -128,8 +131,8 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 ### 1. ローカル：機密情報の準備と同期
 1. **[ローカル]** `.env.example` をコピーして `.env` または `.env.dev` を作成し、必要な設定値を入力する。
 2. **[ローカル]** `pip install -r requirements.txt` を実行して依存ライブラリをインストールする。
-4. **[ローカル]** `aws configure --profile <profile_name>` を実行（開発用なら `factorio-dev`、本番用なら `factorio-prod` 等）し、適切な権限を持つプロファイルを作成する。
-5. **[ローカル]** `python scripts/check_env_leaks.py <env>` を実行し、Git履歴に機密情報が含まれていないか確認する。
+3. **[ローカル]** `aws configure --profile <profile_name>` を実行（開発用なら `factorio-dev`、本番用なら `factorio-prod` 等）し、適切な権限を持つプロファイルを作成する。
+4. **[ローカル]** `python scripts/check_env_leaks.py <env>` を実行し、Git履歴に機密情報が含まれていないか確認する。
 
 ### 2. AWS：インフラリソースの構築
 1. **[ローカル]** `python scripts/init_aws_resources.py <env>` を実行し、S3, DynamoDB, IAM Role, EventBridge, Lambda の器を自動作成する。
@@ -147,8 +150,14 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 
 ## 🚀 デプロイ
 以下のコマンドで、全てのコード、ポリシー、設定、Discordコマンドを最新の状態に更新できます。
-1. **[ローカル]** `python scripts/deploy_all.py <env>` を実行。
-2. **[ローカル]** `python scripts/test_runner.py <env>` を実行して、正常動作を確認。
+
+```powershell
+# 全リソースの更新とテスト実行（チャット通知あり）
+python scripts/deploy_all.py <env>
+
+# チャット通知を抑制してデプロイとテストを実行
+python scripts/deploy_all.py <env> --silent
+```
 
 ## ⚙️ 設定の変更方法
 無人停止時間や権限設定などを変更したい場合は、以下の手順で行います。

@@ -64,6 +64,27 @@ def update_lambda_alias(client, function_name, version, alias_name="LIVE"):
                             Description=f"Points to the latest stable deployment")
         print(f"  🚩 Alias '{alias_name}' created pointing to version {version}")
 
+def show_deployment_summary(lambda_client, lambda_mapping):
+    """デプロイ後のリソースサマリーを表示する"""
+    print(f"\n{'='*65}")
+    print(f"📊 Deployment Summary")
+    print(f"{'='*65}")
+    print(f"{'Lambda Function':<25} | {'Memory':<8} | {'Timeout':<8} | {'Last Modified':<20} | {'Description'}")
+    print(f"{'-'*25}-|-{'-'*8}-|-{'-'*8}-|{'-'*20}-|{'-'*30}")
+
+    for item in lambda_mapping:
+        name = os.getenv(item["env"])
+        if not name: continue
+        try:
+            r = lambda_client.get_function_configuration(FunctionName=name)
+            mem = f"{r['MemorySize']}MB"
+            tm = f"{r['Timeout']}s"
+            mod = r['LastModified'].split('.')[0].replace('T', ' ')
+            desc = r.get('Description', '-')
+            print(f"{name:<25} | {mem:<8} | {tm:<8} | {mod:<20} | {desc}")
+        except Exception:
+            print(f"{name:<25} | {'N/A':<8} | {'N/A':<8} | {'Not Found':<20} | -")
+
 def deploy_lambda_functions():
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -203,6 +224,9 @@ def deploy_lambda_functions():
         except Exception as e:
             print(f"❌ Failed to deploy {function_name}: {e}")
             has_error = True
+
+    if not has_error:
+        show_deployment_summary(lambda_client, lambda_mapping)
 
     print("\n--- Deployment process finished ---")
     if has_error:

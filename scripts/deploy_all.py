@@ -5,7 +5,7 @@ import argparse
 from dotenv import dotenv_values
 import boto3
 
-def run_script(script_path, env):
+def run_script(script_path, env, extra_args=None):
     """ヘルパースクリプトを実行する"""
     print(f"\n{'='*60}")
     print(f"🚀 Executing: {script_path} {env}")
@@ -19,8 +19,12 @@ def run_script(script_path, env):
     if script_path == "scripts/setup_config.py":
         os.environ['SETUP_CONFIG_DONE'] = '1'
 
+    cmd = [python_exe, script_path, env]
+    if extra_args:
+        cmd.extend(extra_args)
+
     try:
-        result = subprocess.run([python_exe, script_path, env], check=True, env=os.environ)
+        result = subprocess.run(cmd, check=True, env=os.environ)
         return True
     except subprocess.CalledProcessError as e:
         print(f"❌ Error during execution of {script_path}: {e}")
@@ -55,45 +59,6 @@ def is_dirty():
     except Exception:
         return False
 
-def show_deployment_summary(env, project_root):
-    """デプロイ後のリソースサマリーを表示する"""
-    env_file = ".env" if env == "prod" else f".env.{env}"
-    env_path = os.path.join(project_root, env_file)
-    if not os.path.exists(env_path): return
-
-    conf = dotenv_values(env_path)
-    region = conf.get('AWS_REGION', 'ap-northeast-1')
-    lambdas = [
-        conf.get('INTERACTOR_LAMBDA_NAME', 'Factorio_Interactor'),
-        conf.get('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'),
-        conf.get('WORKER_LAMBDA_NAME', 'Factorio_Worker'),
-        conf.get('NOTIFIER_LAMBDA_NAME', 'Factorio_Notifier')
-    ]
-
-    print(f"\n{'='*65}")
-    print(f"📊 Deployment Summary [{env.upper()}]")
-    print(f"{'='*65}")
-    print(f"{'Lambda Function':<25} | {'Memory':<8} | {'Timeout':<8} | {'Last Modified':<20} | {'Description'}")
-    print(f"{'-'*25}-|-{'-'*8}-|-{'-'*8}-|{'-'*20}-|{'-'*30}")
-
-    try:
-        session = boto3.Session(profile_name=conf.get('AWS_PROFILE'))
-        client = session.client('lambda', region_name=region)
-        
-        for name in lambdas:
-            if not name: continue
-            try:
-                r = client.get_function_configuration(FunctionName=name)
-                mem = f"{r['MemorySize']}MB"
-                tm = f"{r['Timeout']}s"
-                mod = r['LastModified'].split('.')[0].replace('T', ' ')
-                desc = r.get('Description', '-')
-                print(f"{name:<25} | {mem:<8} | {tm:<8} | {mod:<20} | {desc}")
-            except:
-                print(f"{name:<25} | {'N/A':<8} | {'N/A':<8} | {'Not Found':<20} | -")
-    except Exception as e:
-        print(f"ℹ️  Could not generate summary: {e}")
-
 def main():
     # スクリプトの場所を基準にプロジェクトルートへ移動
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -122,6 +87,7 @@ def main():
     parser.add_argument("--only", nargs="+", choices=valid_steps, help="実行する特定のステップだけを指定")
     parser.add_argument("--rollback", action="store_true", help="失敗時に自動で cleanup_aws_resources.sh を実行する")
     parser.add_argument("--git-rollback", action="store_true", help="失敗時に前回の成功コミットにチェックアウトして再試行する")
+    parser.add_argument("--silent", action="store_true", help="テスト実行時にチャット通知を抑制する")
 
     args = parser.parse_args()
     env = args.env
@@ -175,7 +141,10 @@ def main():
             print(f"⚠️  Warning: {script} not found, skipping...")
             continue
             
-        if not run_script(script, env):
+        # テスト実行時にサイレントフラグを渡す
+        extra = ["--silent"] if name == "test" and args.silent else None
+
+        if not run_script(script, env, extra_args=extra):
             print(f"\n🛑 Pipeline failed at {script}.")
             
             # Git ロールバック処理
@@ -241,7 +210,7 @@ def main():
                     print(f"❌ Cleanup script not found at {cleanup_script}")
             
             sys.exit(1)
-            
+
     # 3. 成功の記録
     if current_commit:
         try:
@@ -249,9 +218,6 @@ def main():
                 f.write(current_commit)
         except Exception as e:
             print(f"⚠️  Could not write success marker: {e}")
-
-    # 4. サマリー表示
-    show_deployment_summary(env, project_root)
 
     print(f"\n🎉 Full Deployment for [{env}] completed successfully!")
 
