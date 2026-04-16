@@ -187,7 +187,6 @@ def handle_restore(event):
 
             return get_msg("restore", "complete", locale, date=v_date, id=vid), None
         except Exception as e:
-            # TODO ID:030: restore select の詳細失敗情報はログチャットへ分離し、メインチャットは要約のみ返す
             err_text = str(e)
             notify(
                 f"⚠️ [LOG] Restore select failed. key={key} version_id={vid} error={err_text}",

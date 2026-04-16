@@ -121,7 +121,7 @@ def fetch_config_from_ssm(path=None):
     try:
         # パス配下のパラメータを取得
         paginator = ssm.get_paginator('get_parameters_by_path')
-        # TODO ID:004: String化後の一括取得互換性を確認
+        # WithDecryption は String では無視され、SecureString のみ復号される。
         for page in paginator.paginate(Path=path, WithDecryption=True):
             for p in page['Parameters']:
                 key = p['Name'].split('/')[-1].lower()

@@ -1,5 +1,5 @@
 プロジェクト管理表
-[ ] ID:001 [FIX] [OPS] 非機密SSMをString保存へ変更
+[x] ID:001 [FIX] [OPS] 非機密SSMをString保存へ変更
     ・関連箇所: scripts/register.py
     ・Issue: #6 (https://github.com/ky0709/factorio-server-manager/issues/6)
     ・背景: .envで管理している環境変数をSSMへアップロードしてLambda実行時に都度取得しているが、非機密情報までSecureStringになっており、復号付きリクエスト増加でコスト上昇リスクがあるため。
@@ -10,12 +10,12 @@
     ・背景: 無人判定が連続チェック回数依存だと監視間隔に影響されやすいため、経過時間ベースに統一して運用安定性を上げる必要があるため。
     ・完了条件: 3ファイルで`MIN_IDLE_MINUTES`へ統一され、`ZERO_PLAYER_THRESHOLD`依存がなくなること。
 
-[ ] ID:003 [TASK] [LOGIC] String化後の`get_parameter(WithDecryption=True)`互換性確認
+[x] ID:003 [TASK] [LOGIC] String化後の`get_parameter(WithDecryption=True)`互換性確認
     ・関連箇所: aws/Lambda/Factorio_Notifier/lambda_function.py
     ・背景: ID:001で非機密情報をStringへ切り替えた後も、Notifierの単体取得処理が既存実行フローで失敗しないことを確認する必要があるため。
     ・完了条件: `get_parameter(WithDecryption=True)`でString/SecureString混在時もエラーが発生しないこと。
 
-[ ] ID:004 [TASK] [LOGIC] String化後の`get_parameters_by_path(WithDecryption=True)`互換性確認
+[x] ID:004 [TASK] [LOGIC] String化後の`get_parameters_by_path(WithDecryption=True)`互換性確認
     ・関連箇所: aws/Lambda/factorio_common_layer/python/factorio_common/utils.py
     ・背景: ID:001で非機密情報をStringへ切り替えた後も、共通レイヤーの一括取得処理が既存実行フローで失敗しないことを確認する必要があるため。
     ・完了条件: `get_parameters_by_path(WithDecryption=True)`でString/SecureString混在時もエラーが発生しないこと。
@@ -145,7 +145,7 @@
     ・背景: `/save` や `/stop` 実行直後は `LatestSaveInfo` に Timestamp しか入らず、`/status` 表示でサイズが `-MB` になって情報不足に見えるため。
     ・完了条件: Executor が `LatestSaveInfo` 更新時に `FileSize` も併せて保存し、`/status` でタイムスタンプとサイズが同時に表示されること。
 
-[ ] ID:030 [FIX] [UI] restore select の権限系失敗詳細をログチャットへ分離しメインチャットの案内を改善
+[x] ID:030 [FIX] [UI] restore select の権限系失敗詳細をログチャットへ分離しメインチャットの案内を改善
     ・関連箇所: aws/Lambda/Factorio_Worker/lambda_function.py, aws/IAM/FactorioWorkPolicy/policy.json.example
     ・背景: `/restore select` 失敗時に AccessDenied の詳細がメインチャットへ露出し、ユーザー向け案内として冗長かつ機密寄りの情報を含むため。あわせて `SAVE_FILE_KEY` 変更後に WorkPolicy の反映が漏れると `s3:GetObjectVersion` で失敗するため。
     ・完了条件: restore select の詳細エラーはログチャットへ送られ、メインチャットには復元失敗の要約と対策のみが表示されること。必要な WorkPolicy 反映手順が追跡できること。

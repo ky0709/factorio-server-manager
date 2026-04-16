@@ -47,8 +47,8 @@ AWS_REGION = os.getenv('AWS_REGION', 'ap-northeast-1')
 SSM_BASE = os.getenv('SSM_PARAMETER_PATH', '/factorio/')
 print(f"📌 SSM Base Path: {SSM_BASE}")
 
-# 同期対象の機密情報
-SECRETS_TO_SYNC = {
+# SSM同期対象
+PARAMETERS_TO_SYNC = {
     'DISCORD_WEBHOOK_URL': f'{SSM_BASE}DISCORD_WEBHOOK_URL',
     'DISCORD_LOG_WEBHOOK_URL': f'{SSM_BASE}DISCORD_LOG_WEBHOOK_URL',
     'RCON_PASSWORD': f'{SSM_BASE}RCON_PASSWORD',
@@ -78,6 +78,14 @@ SECRETS_TO_SYNC = {
     'RCON_READY_CHECK_INTERVAL_SECONDS': f'{SSM_BASE}RCON_READY_CHECK_INTERVAL_SECONDS',
     'RCON_READY_CHECK_MAX_ATTEMPTS': f'{SSM_BASE}RCON_READY_CHECK_MAX_ATTEMPTS',
     # TODO ID:006: ハイブリッド運用向けにSERVER_RUN_MODE/INSTANCE_PROVISIONING_TYPE/LAUNCH_TEMPLATE関連キーを追加
+}
+
+# 機密扱いが必要なものだけ SecureString で保存する。
+SECURE_STRING_KEYS = {
+    'DISCORD_WEBHOOK_URL',
+    'DISCORD_LOG_WEBHOOK_URL',
+    'RCON_PASSWORD',
+    'GAME_PASSWORD',
 }
 
 def register_commands():
@@ -249,7 +257,7 @@ def sync_secrets_to_ssm():
             region_name=AWS_REGION
         )
         
-        for env_key, ssm_path in SECRETS_TO_SYNC.items():
+        for env_key, ssm_path in PARAMETERS_TO_SYNC.items():
             value = os.getenv(env_key)
             
             # .envにキーが存在しない、または値が空の場合の処理
@@ -265,15 +273,15 @@ def sync_secrets_to_ssm():
                     continue
 
             print(f"🔄 Syncing {env_key} to {ssm_path}...")
-            # TODO ID:001: 非機密SSMはStringで保存
+            parameter_type = 'SecureString' if env_key in SECURE_STRING_KEYS else 'String'
             ssm.put_parameter(
                 Name=ssm_path,
                 Value=value,
-                Type='SecureString',
+                Type=parameter_type,
                 Tier='Standard',
                 Overwrite=True
             )
-            print(f"✅ Successfully synced {env_key}")
+            print(f"✅ Successfully synced {env_key} as {parameter_type}")
             time.sleep(0.2)
 
         # --- Lambda キャッシュのリフレッシュ ---
