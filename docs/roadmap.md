@@ -1,70 +1,57 @@
-📝 Factorio Server Manager 開発ロードマップ
-Phase 1: サーバー状態の可視化 (/status)
-[x] feature/status-command ブランチの作成
+📝 Factorio Server Manager 開発ロードマップ (v2.0)
+🏗️ Step 1: サーバー基盤と自動運用の確立（完了）
+基本的な「動く仕組み」と、コスト削減のための自動停止ロジックを構築。
 
-[x] register.py の更新: /status コマンドの定義と登録
+[x] サーバー可視化: /status コマンドによる EC2 状態確認。
 
-[x] 親Lambda (Interactions) の修正: status アクションを認識し、子へ非同期に渡すロジックの追加
+[x] 停止時データ保護: RCON 連携によるセーブ命令発行後の安全な停止。
 
-[x] 子Lambda (Executor) の修正: ec2.describe_instances を用いた状態取得と、Discordへの整形メッセージ送信
+[x] 自動運用: プレイヤーゼロ継続時の自動シャットダウン、定時停止。
 
-[x] 動作確認: Discord上で /status が正しく現在のEC2状態を返すかテスト
+🛡️ Step 2: ステートレス・アーキテクチャと信頼性向上（完了）
+Amazon S3 Files の導入と、4層構造（Interactor/Executor/Worker/Notifier）への刷新。
 
-[x] Pull Request 作成 & develop へマージ
+[x] 4層分離: 責務を完全に分け、非同期通知（Followup/POST）を実現。
 
-Phase 2: サーバー停止時のデータ整合性確保
-[x] feature/safe-save-on-stop ブランチの作成
+[x] ストレージ革新: S3 Files によるセーブデータのマウントとバージョニング。
 
-[x] RCON (Remote Console) の導入: EC2内のFactorioへセーブ命令を送るための設定
+[x] 環境分離 (Dev/Prod): -dev サフィックスによる AWS リソースの完全分離と .env.dev 運用。
 
-[x] 停止ロジックの改善: EC2を止める直前に server-save コマンドを発行し、保存完了を確認してからインスタンスを停止する処理の実装
+[x] 品質保証: test_runner.py による Lambda 統合テストと自動レポート。
 
-[x] Pull Request 作成 & develop へマージ
+[x] セキュリティ: 特定ユーザーへの権限制限（/restore 等）とパスワード保護。
 
-Phase 3: 自動停止・定時停止機能
-[x] feature/auto-stop ブランチの作成
+📦 Step 3: S3 ディレクトリ統合（現行フェーズ）
+完全ステートレス化に向け、EC2 内の永続データを S3 へ集約する。
 
-[x] EC2内監視スクリプトの作成: プレイヤー数を取得するPythonスクリプトの作成
+[x] `/saves` の S3 統合（`saves/save.zip`）と履歴運用の確立。
+[ ] `/mods`, `/config`, `/logs` を S3 バケットへ完全集約。
+[ ] EC2 起動時の自動マウント・リンク設定の最適化。
 
-[x] EventBridge (Scheduler) の設定:
+🧭 Step 4: Discord リモート管理の枠組み整備
+先行してコマンド枠組みと権限制御のみ整備し、本機能は後続ステップで実装する。
 
-[x]毎日指定時刻に停止Lambdaを叩く設定
+[ ] `/config`, `/mods`, `/admin` のコマンド定義とルーティング枠組みを追加。
+[ ] 管理者専用コマンドの強制制限（専用変数）を導入。
+[ ] 未実装機能は maintenance/案内レスポンスで安全に返す。
 
-[x]5分おきに監視Lambdaを叩く設定
+⚙️ Step 5: サーバー運用モード拡張（コスト最適化優先）
+固定インスタンス運用に加え、動的作成運用を選択可能にしてコストと可用性の選択肢を広げる。
 
-[x] Lambdaの更新: プレイヤー0人が一定時間続いた場合の停止ロジック実装
+[ ] STATIC/DYNAMIC ハイブリッド運用（固定インスタンス運用と起動テンプレート作成運用の切替）。
+[ ] Spot/On-Demand の選択運用と、停止時の terminate フロー整備。
 
-[x] Pull Request 作成 & develop へマージ
+🧩 Step 6: Discord リモート管理機能の本実装
+Step 4 で用意した枠組みへ、運用機能を段階的に実装する。
 
-Phase 4: セーブデータ管理と自動バックアップ (S3 Files 連携)
+[ ] `/config`: 設定一覧・項目説明の参照と、項目/値指定での設定変更。
+[ ] `/mods`: 有効/無効の一覧確認、切替、個別MOD情報の参照。
+[ ] `/admin`: ゲーム内管理者リストの確認と追加/削除。
+[ ] `/log`: Glue/Athena を使ったログ分析レポート導入を検討（コマンド化は要件確定後）。
 
-**初期ステップ**: 現在のセーブデータフォルダおよびログフォルダを Amazon S3 Files にマウントする。
+🤖 Step 7: AI プレイヤー・エコシステム
+Factorio 内で活動する AI との高度な連携。
 
-**Amazon S3 Files 採用**: 2026年4月7日に発表された Amazon S3 Files を採用。従来の EFS や手動同期スクリプトを排除し、S3 のコストメリットとファイルシステムの利便性を両立させた最新のストレージ戦略を実装予定。
+[ ] AI 連携基盤: AI 専用サーバー（別環境）との通信 API 実装。
 
-⚠️ **実装時の注意点（要確認）**:
-発表されたばかりなので、以下の点を公式ドキュメントで確認する必要があります：
-- 書き込みの遅延（レイテンシ）: Factorioのオートセーブ時にゲームが止まらない程度の速度が出るか。
-
-[x] feature/save-data-management ブランチの作成
-
-[x] S3バケットの作成とIAMポリシー更新: Lambda/EC2のS3アクセス権限追加
-
-[x] IAMポリシーのテンプレート化と自動生成スクリプト (setup_config.py) の実装
-
-[x] S3 バケットのバージョニング設定:
-
-[x] /save コマンドの実装: サーバーを停止せずにRCON経由でセーブを実行する機能
-
-[x] /restore コマンドの実装: S3バージョニングを利用した過去データのリスト表示と復元機能
-
-[ ] Pull Request 作成 & develop へマージ
-
-Phase 5: AIプレイヤー連携
-[ ] feature/ai-player-integration ブランチの作成
-
-[ ] AI用サーバー（別環境）との連携APIの実装
-
-[ ] 連動停止ロジック: Factorio停止時にAIサーバーへ終了リクエストを送る処理
-
-[ ] Pull Request 作成 & develop へマージ
+[ ] 連動シャットダウン: Factorio 停止に合わせた AI インスタンスの正常終了。

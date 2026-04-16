@@ -1,0 +1,90 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowLogging",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:<REGION>:<ACCOUNT_ID>:*"
+        },
+        {
+            "Sid": "AllowEC2InstanceControl",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:StartInstances",
+                "ec2:StopInstances"
+            ],
+            "Resource": "arn:aws:ec2:<REGION>:<ACCOUNT_ID>:instance/<INSTANCE_ID>"
+        },
+        {
+            "Sid": "AllowEC2Describe",
+            "Effect": "Allow",
+            "Action": "ec2:DescribeInstances",
+            "Resource": "*"
+        },
+        {
+            "Sid": "AllowSSMParameterAccess",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter",
+                "ssm:GetParameters",
+                "ssm:GetParametersByPath",
+                "ssm:PutParameter"
+            ],
+            "Resource": [
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter<SSM_PARAMETER_PATH>*"
+            ]
+        },
+        {
+            "Sid": "AllowSSMCommandExecution",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:SendCommand"
+            ],
+            "Resource": [
+                "arn:aws:ec2:<REGION>:<ACCOUNT_ID>:instance/<INSTANCE_ID>",
+                "arn:aws:ssm:<REGION>::document/AWS-RunShellScript"
+            ]
+        },
+        {
+            "Sid": "AllowKMSDecrypt",
+            "Effect": "Allow",
+            "Action": [
+                "kms:Decrypt"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "AllowDynamoDBStateAccess",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem"
+            ],
+            "Resource": "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/<DYNAMODB_TABLE_NAME>"
+        },
+        {
+            "Sid": "AllowS3AccessForStatus",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::<S3_BUCKET_NAME>/<SAVE_FILE_KEY>"
+            ]
+        },
+        {
+            "Sid": "AllowLambdaInvokeNotifier",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": [
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<NOTIFIER_LAMBDA_NAME>"
+            ]
+        }
+    ]
+}

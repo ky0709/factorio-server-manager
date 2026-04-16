@@ -2,15 +2,256 @@
     "Version": "2012-10-17",
     "Statement": [
         {
+            "Sid": "S3BucketManagement",
+            "Effect": "Allow",
+            "Action": [
+                "s3:CreateBucket",
+                "s3:PutBucketVersioning",
+                "s3:GetBucketLocation",
+                "s3:ListBucket",
+                "s3:ListBucketVersions",
+                "s3:DeleteBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::factorio-*"
+            ]
+        },
+        {
+            "Sid": "DynamoDBTableManagement",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:CreateTable",
+                "dynamodb:DescribeTable",
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DeleteTable"
+            ],
+            "Resource": [
+                "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/Factorio*"
+            ]
+        },
+        {
             "Sid": "SSMParameterControl",
             "Effect": "Allow",
             "Action": [
-                "ssm:PutParameter"
+                "ssm:PutParameter",
+                "ssm:GetParameter",
+                "ssm:GetParametersByPath",
+                "ssm:DeleteParameters"
             ],
             "Resource": [
-                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/RCON_PASSWORD",
-                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/DISCORD_WEBHOOK_URL"
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter<SSM_PARAMETER_PATH>*"
             ]
+        }
+        ,
+        {
+            "Sid": "AllowLambdaManagementForTestingAndRefresh",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:CreateFunction",
+                "lambda:DeleteFunction",
+                "lambda:InvokeFunction",
+                "lambda:GetFunction",
+                "lambda:ListVersionsByFunction",
+                "lambda:UpdateFunctionConfiguration",
+                "lambda:GetFunctionConfiguration",
+                "lambda:UpdateFunctionCode",
+                "lambda:AddPermission",
+                "lambda:RemovePermission",
+                "lambda:GetPolicy",
+                "lambda:GetAlias",
+                "lambda:CreateAlias",
+                "lambda:UpdateAlias",
+                "lambda:DeleteAlias"
+            ],
+            "Resource": [
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:Factorio_*"
+            ]
+        }
+        ,
+        {
+            "Sid": "AllowLambdaLayerManagement",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:PublishLayerVersion",
+                "lambda:ListLayerVersions",
+                "lambda:DeleteLayerVersion",
+                "lambda:GetLayerVersion"
+            ],
+            "Resource": "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:layer:*"
+        }
+        ,
+        {
+            "Sid": "AllowIAMManagement",
+            "Effect": "Allow",
+            "Action": [
+                "iam:GetPolicy",
+                "iam:CreatePolicy",
+                "iam:DeletePolicy",
+                "iam:GetPolicyVersion",
+                "iam:ListPolicyVersions",
+                "iam:CreatePolicyVersion",
+                "iam:DeletePolicyVersion",
+                "iam:GetRole",
+                "iam:CreateRole",
+                "iam:DeleteRole",
+                "iam:GetInstanceProfile",
+                "iam:CreateInstanceProfile",
+                "iam:DeleteInstanceProfile",
+                "iam:AddRoleToInstanceProfile",
+                "iam:RemoveRoleFromInstanceProfile",
+                "iam:GetRolePolicy",
+                "iam:ListRolePolicies",
+                "iam:ListAttachedRolePolicies",
+                "iam:AttachRolePolicy",
+                "iam:DetachRolePolicy",
+                "iam:PutRolePolicy",
+                "iam:DeleteRolePolicy"
+            ],
+            "Resource": [
+                "arn:aws:iam::<ACCOUNT_ID>:policy/Factorio*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/Factorio*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/EC2-Factorio-*",
+                "arn:aws:iam::<ACCOUNT_ID>:instance-profile/Factorio*",
+                "arn:aws:iam::<ACCOUNT_ID>:instance-profile/EC2-Factorio-*",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/Amazon_EventBridge_Invoke_Lambda_*",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/Amazon-EventBridge-*",
+                "arn:aws:iam::<ACCOUNT_ID>:policy/AWSLambdaBasicExecutionRole-*"
+            ]
+        },
+        {
+            "Sid": "EventBridgeManagement",
+            "Effect": "Allow",
+            "Action": [
+                "events:PutRule",
+                "events:DeleteRule",
+                "events:DescribeRule",
+                "events:PutTargets",
+                "events:ListTargetsByRule",
+                "events:RemoveTargets",
+                "scheduler:CreateSchedule",
+                "scheduler:DeleteSchedule",
+                "scheduler:GetSchedule",
+                "scheduler:UpdateSchedule",
+                "scheduler:ListSchedules"
+            ],
+            "Resource": [
+                "arn:aws:events:<REGION>:<ACCOUNT_ID>:rule/Factorio-*",
+                "arn:aws:scheduler:<REGION>:<ACCOUNT_ID>:schedule/default/Factorio-*"
+            ]
+        },
+        {
+            "Sid": "EC2ReadOnlyForTesting",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeInstances",
+                "ec2:DescribeIamInstanceProfileAssociations",
+                "ec2:AssociateIamInstanceProfile",
+                "ec2:ReplaceIamInstanceProfileAssociation"
+            ],
+            "Resource": [
+                "*"
+            ]
+        },
+        {
+            "Sid": "S3FilesApiForInit",
+            "Effect": "Allow",
+            "Action": "s3files:*",
+            "Resource": "*"
+        },
+        {
+            "Sid": "S3FilesInitEC2Networking",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeSubnets",
+                "ec2:DescribeNetworkInterfaces",
+                "ec2:DescribeNetworkInterfaceAttribute",
+                "ec2:CreateNetworkInterface",
+                "ec2:DeleteNetworkInterface",
+                "ec2:ModifyNetworkInterfaceAttribute",
+                "ec2:DescribeSecurityGroups",
+                "ec2:DescribeVpcs",
+                "ec2:DescribeAvailabilityZones"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "S3FilesInitBucketNotifications",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetBucketNotification",
+                "s3:PutBucketNotification"
+            ],
+            "Resource": "arn:aws:s3:::factorio-*"
+        },
+        {
+            "Sid": "S3FilesInitEventBridgeRules",
+            "Effect": "Allow",
+            "Action": [
+                "events:DeleteRule",
+                "events:PutRule",
+                "events:PutTargets",
+                "events:RemoveTargets"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "events:ManagedBy": "elasticfilesystem.amazonaws.com"
+                }
+            },
+            "Resource": [
+                "arn:aws:events:<REGION>:<ACCOUNT_ID>:rule/DO-NOT-DELETE-S3-Files*"
+            ]
+        },
+        {
+            "Sid": "S3FilesInitEventBridgeRead",
+            "Effect": "Allow",
+            "Action": [
+                "events:DescribeRule",
+                "events:ListRuleNamesByTarget",
+                "events:ListRules",
+                "events:ListTargetsByRule"
+            ],
+            "Resource": [
+                "arn:aws:events:<REGION>:<ACCOUNT_ID>:rule/*"
+            ]
+        },
+        {
+            "Sid": "IAMPassRoleS3FilesLinkedRole",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": [
+                "arn:aws:iam::<ACCOUNT_ID>:role/<S3_FILES_SERVICE_ROLE_NAME>*"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": "elasticfilesystem.amazonaws.com"
+                }
+            }
+        },
+        {
+            "Sid": "IAMPassRole",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": [
+                "arn:aws:iam::<ACCOUNT_ID>:role/<INTERACTOR_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<EXECUTOR_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<WORKER_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<NOTIFIER_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<EVENTBRIDGE_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<EC2_SERVER_ROLE_NAME>*"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": [
+                        "lambda.amazonaws.com",
+                        "scheduler.amazonaws.com",
+                        "events.amazonaws.com",
+                        "ec2.amazonaws.com"
+                    ]
+                }
+            }
         }
     ]
 }

@@ -1,6 +1,10 @@
 .env
+.env.dev
 venv/
 __pycache__/
 *.pyc
+/.deploy_state/
 aws/Lambda/*/archive.zip
 aws/IAM/*/policy.json
+pem/
+data/
