@@ -27,8 +27,8 @@
 
 [ ] ID:006 [TASK] [LOGIC] サーバー起動ロジックをSTATIC/DYNAMICのハイブリッド運用へ拡張
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Worker/lambda_function.py, scripts/register.py, scripts/check_env_leaks.py, .env.example, README.md, aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioWorkPolicy/policy.json.example
-    ・背景: 固定インスタンスの起動停止運用を維持しつつ、起動テンプレート経由の新規作成（spot/ondemand）と終了を切り替え可能にし、運用コストと可用性の選択肢を持たせる必要があるため。
-    ・完了条件: SERVER_RUN_MODEおよびINSTANCE_PROVISIONING_TYPEを使った分岐方針、起動テンプレート利用時のrun/terminateフロー、アクティブInstanceIdの保持先（DynamoDB等）、Spot中断時の退避方針、必要IAM権限の差分、実装着手手順（ブランチ作成開始を含む）がコード内TODOとtasks.mdから追跡可能になっていること。
+    ・背景: 固定インスタンスの起動停止運用を維持しつつ、起動テンプレート経由の新規作成（spot/ondemand）と終了を切り替え可能にし、運用コストと可用性の選択肢を持たせる必要があるため。Executor が肥大化しているため、**ID:039 で同一 Lambda 内モジュール分割を先行**し、その境界に沿ってハイブリッド分岐を載せる（巨大関数への if 積み増しを避ける）。
+    ・完了条件: SERVER_RUN_MODEおよびINSTANCE_PROVISIONING_TYPEを使った分岐方針、起動テンプレート利用時のrun/terminateフロー、アクティブInstanceIdの保持先（DynamoDB等）、Spot中断時の退避方針、必要IAM権限の差分、実装着手手順（ブランチ作成開始を含む）がコード内TODOとTASKS.mdから追跡可能になっていること。**ID:039 完了後に本ロジックを実装**し、稼働検証後に **ID:040** で Lambda 物理分割の要否を判断すること。
 
 [x] ID:007 [FIX] [LOGIC] deploy_policies.py の環境読込優先度を修正
     ・関連箇所: scripts/deploy_policies.py
@@ -190,7 +190,57 @@
     ・背景: `/config` `/mods` `/admin` の本実装前に、コマンド登録・ルーティング・権限制御の枠組みのみ先行整備し、運用モード拡張（ID:006）を優先実装できる状態にしたいため。
     ・完了条件: 対象コマンドの定義と安全な暫定応答（maintenance/案内）が動作し、`RESTRICTED_COMMAND_STRINGS` とは別の強制管理者制御変数（例: `STRICT_ADMIN_COMMAND_STRINGS`）で実行制御できること。
 
-・運用ルール: 未完了は[ ]、完了後は[x]に更新する
+[ ] ID:039 [TASK] [QUAL] Factorio_Executor をハイブリッド実装前にモジュール分割（同一 Lambda 内）
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py
+    ・背景: ID:006 実装時に InstanceId 解決・起動/終了・EventBridge 連携が複雑化するため、**先に同一 Lambda 内で責務境界**（例: EC2 オーケストレーション、RCON、カタログ/DynamoDB・S3 メタ、Discord 応答整形、EB イベント処理）をファイルまたはモジュールに分割し、ハイブリッド分岐を載せる土台を作る必要があるため。
+    ・完了条件: `lambda_handler` が薄くなり、主要処理がモジュール化された状態で既存フロー（STATIC）の回帰テストが通ること。分割方針が README または `docs/TASKS.md` から追跡できること。
+
+[ ] ID:040 [TASK] [QUAL] ハイブリッド稼働検証後に Executor の Lambda 物理分割を検討
+    ・関連箇所: aws/Lambda/Factorio_Executor/, scripts/deploy_lambda.py, scripts/init_aws_resources.py, aws/IAM/*Policy/policy.json.example
+    ・背景: ID:006 完了後、負荷・タイムアウト・デプロイ境界の観点から、同一 Lambda 分割が妥当か判断する必要があるため。
+    ・完了条件: 物理分割の要否、分割案（関数単位・責務）、IAM/EventBridge/Interactor ルーティング変更、移行手順が文書化され、実施する場合は別タスクに切り出せること。
+
+[x] ID:041 [TASK] [OPS] ステップ横断の考慮事項を TASKS.md に集約する
+    ・関連箇所: docs/TASKS.md, docs/roadmap.md
+    ・背景: ロードマップ上は別ステップでも、着手順を誤ると再作業や権限・テスト不足が重なるため、開発者向けの前提を単一箇所にまとめる必要があるため。
+    ・完了条件: 本条直後の「ステップ横断の考慮事項」節が追加され、主要 ID への参照が付いていること。
+
+## ステップ横断の考慮事項（開発・着手前チェック）
+
+ロードマップの Step と無関係に増えやすい作業のメモ。**利用者向けの説明は `docs/roadmap.md` のみ**に寄せる。
+
+- **Step 3（ID:033 / ID:034）と Step 5（ID:006）**  
+  DYNAMIC で新規インスタンスを立てる場合、**起動時マウント・ユーザーデータ（ID:034）**が不安定だとゲーム用データが揃わない。006 を本番相当で進めるなら 034 の方針を先に固めるか、006 の検証環境で userdata を明示する。  
+  **ID:033**（mods/config/logs の S3 化）は Executor のパス・I/O 前提に触れる。**ID:039** の分割境界と同時に設計しないと、分割直後に Executor を再度大きく動かすことになる。
+
+- **Step 5（ID:006）と IAM / スクリプト**  
+  DynamoDB・起動テンプレート・追加 API などを足すと、**`init_aws_resources.py`・`deploy_policies.py`・`policy.json.example`・`register.py`・`check_env_leaks.py`** がセットで動きがち（過去の IAM 整備タスクと同型）。「Lambda だけ」の見積もりにしない。
+
+- **ID:002（無人停止）と ID:006**  
+  インスタンス寿命が STATIC と DYNAMIC で変わる。**閾値の意味**（最終プレイヤー離脱からの分、ヘルスチェックとの関係など）を 006 側で決めてから 002 を仕上げると手戻りが減る。
+
+- **ID:027 / ID:028 と Executor 変更**  
+  起動・停止・待機パスが増えると、**統合テストの分岐・待機・後始末**が不足しがち。039 の STATIC 回帰に続け、006 用の最小シナリオを早めに決める。
+
+- **Step 6（ID:035 / ID:036）と ID:033**  
+  `/config` `/mods` は「正のデータが EC2 か S3 か」に依存する。033 の配置・同期方針が曖昧なまま Step 6 を進めると実装方針の転換コストが大きい。
+
+- **ID:031（エラー文言 i18n）**  
+  Step 4〜6 でコマンド・エラー経路が増えるほど、**未対応のハードコード文言が並行で積み上がる**。枠組み先行（ID:038）の段階から方針だけ決めておくとよい。
+
+- **`factorio_common` レイヤー**  
+  共通ユーティリティを変えると **複数 Lambda の再デプロイ・互換**が一括で必要になりやすい。
+
+- **`scripts/register.py`**  
+  Discord コマンド・環境変数が増えるたびに衝突しやすい。**同一ファイルを触るブランチは短く切る**か、マージ順を決める。
+
+・運用ルール: 未完了は[ ]、完了後は[x]に更新する。主要 Step 着手前に「ステップ横断の考慮事項」節を確認する。
+
+・ブランチ（推奨・開発者向け）
+    ・既定ブランチ（例: `develop`）へ集約する前に、対象 ID の変更は **feature ブランチ**（例: `feature/ID-039-executor-split`）で完結させる。
+    ・**Executor（039/006）と Discord 登録（038）や S3 統合（033）を同一ブランチに混ぜない**（`register.py` / Executor の競合とレビュー負荷を避ける）。
+    ・マージ前に **対象環境で `test_runner`（必要なら ID:028 の部分実行）** を通す。インフラ変更は **dev** で確認してから prod 用ポリシー・手順を更新する。
+    ・ロードマップの **大きな順序変更**をしたら、本条「ステップ横断の考慮事項」と `docs/roadmap.md` を同じ PR か直後のコミットで整合させる。
 
 ・アクション (Action)
     ・FEAT: 新機能の追加、ドキュメントの新規作成
