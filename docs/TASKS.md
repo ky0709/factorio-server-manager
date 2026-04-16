@@ -155,6 +155,41 @@
     ・背景: 通常メッセージは日本語/英語に対応している一方で、権限不足や設定不備など一部のエラー応答は日本語固定のハードコード文言が残っており、英語ロケール利用時に不自然なため。
     ・完了条件: メインチャット向けの主要エラー応答が `locale` に応じて日本語/英語で返ること。
 
+[x] ID:032 [FIX] [UI] command_reference と README のコマンド仕様説明を現行実装へ整合
+    ・関連箇所: docs/command_reference.md, README.md
+    ・背景: `/start` `/stop` `/restore` `/pass` の説明に固定値前提や旧挙動の記載が残り、実装との差分で運用判断を誤る恐れがあるため。
+    ・完了条件: command_reference と README の主要コマンド説明が現行 Lambda 実装と矛盾しない記載へ更新されていること。
+
+[ ] ID:033 [FEAT] [OPS] mods/config/logs の S3 ディレクトリ統合を実装
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, docs/ec2_setup_reference.md, .env.example
+    ・背景: 現在は `saves/save.zip` の運用は確立している一方、`/mods` `/config` `/logs` は S3 統合が未完了で、完全ステートレス運用が成立していないため。
+    ・完了条件: `mods/config/logs` を S3 側へ統合する手順と実装が整備され、再起動後も同一データを継続利用できること。
+
+[ ] ID:034 [FEAT] [OPS] EC2 起動時の S3 マウント/リンク自動化を強化
+    ・関連箇所: docs/ec2_setup_reference.md, scripts/init_aws_resources.py, aws/Lambda/Factorio_Executor/lambda_function.py
+    ・背景: S3 Files の手動確認・補正手順が残っており、インスタンス再作成や初回起動時の運用負荷が高いため。
+    ・完了条件: 起動時に必要なマウントとリンク設定が自動で安定適用され、手動介入なしでゲーム実行パスが揃うこと。
+
+[ ] ID:035 [FEAT] [UI] Discord `/config` コマンドで server-settings を管理
+    ・関連箇所: scripts/register.py, aws/Lambda/Factorio_Interactor/lambda_function.py, aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/factorio_common_layer/python/factorio_common/utils.py
+    ・背景: 設定変更のたびにサーバーへ直接ログインする必要があり、運用者の体験が悪いため。あわせて設定項目の意味を Discord 上で確認できる導線が必要なため。
+    ・完了条件: `/config` で「設定一覧の閲覧」「項目/値指定での設定変更」「設定項目一覧と説明確認（単一項目指定含む）」が実行できること。加えて、既定で `/config` 全サブコマンドを管理者限定にする専用制御変数（`RESTRICTED_COMMAND_STRINGS` とは別）を導入し、権限制御できること。
+
+[ ] ID:036 [FEAT] [UI] Discord `/mods` と `/admin` コマンドを追加
+    ・関連箇所: scripts/register.py, aws/Lambda/Factorio_Interactor/lambda_function.py, aws/Lambda/Factorio_Worker/lambda_function.py, scripts/upload_mod_assets.py
+    ・背景: MOD有効化や管理者リスト編集が手動ファイル編集依存で、リモート運用性が不足しているため。MODのメタ情報確認もゲーム外で完結させたいため。
+    ・完了条件: `/mods` で「有効/無効込み一覧」「有効のみ/無効のみフィルタ」「有効化/無効化」「MOD名指定で情報参照（S3上のテキスト情報。未登録時はその旨を返す）」ができること。加えて `/admin` でゲーム内管理者リストの確認と追加/削除ができること。運用面では `data/mod/` 配下の MOD本体・情報テキスト・管理JSONを専用スクリプトで S3 にアップロード（上書き）できること。
+
+[ ] ID:037 [TASK] [OPS] Glue/Athena を用いたログ収集・解析基盤の導入可否を検討
+    ・関連箇所: docs/roadmap.md
+    ・背景: `/log` コマンド導入は未定だが、将来的なユーザーレポート提供に向けて、ログ収集・検索基盤の選定を先に行う必要があるため。
+    ・完了条件: Glue/Athena を使ったログ収集・分析案の実現性、概算コスト、運用負荷、Discord連携方式（コマンド化有無を含む）を整理した方針が確定していること。
+
+[ ] ID:038 [TASK] [UI] Discord リモート管理コマンドの枠組みを先行整備
+    ・関連箇所: scripts/register.py, aws/Lambda/Factorio_Interactor/lambda_function.py, docs/command_reference.md, .env.example
+    ・背景: `/config` `/mods` `/admin` の本実装前に、コマンド登録・ルーティング・権限制御の枠組みのみ先行整備し、運用モード拡張（ID:006）を優先実装できる状態にしたいため。
+    ・完了条件: 対象コマンドの定義と安全な暫定応答（maintenance/案内）が動作し、`RESTRICTED_COMMAND_STRINGS` とは別の強制管理者制御変数（例: `STRICT_ADMIN_COMMAND_STRINGS`）で実行制御できること。
+
 ・運用ルール: 未完了は[ ]、完了後は[x]に更新する
 
 ・アクション (Action)
