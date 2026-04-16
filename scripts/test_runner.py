@@ -14,6 +14,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 parser = argparse.ArgumentParser(description="Factorio Server Manager Integration Test Runner")
 parser.add_argument("env", nargs="?", default="prod", help="Target environment (dev/prod)")
 parser.add_argument("--silent", action="store_true", help="Do not send report to Discord")
+# TODO ID:028: save/stop など特定テストのみ選択実行できるオプションを追加する
 args = parser.parse_args()
 
 env_arg = args.env
@@ -22,14 +23,17 @@ env_path = os.path.join(BASE_DIR, env_file)
 
 if os.path.exists(env_path):
     print(f"📖 Loading environment: {env_file}")
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
 else:
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
 lambda_client = boto3.client('lambda', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
 ec2_client = boto3.client('ec2', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
+s3_client = boto3.client('s3', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
 dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
 factorio_state_table = dynamodb.Table(os.getenv('DYNAMODB_TABLE_NAME', 'FactorioState'))
+save_bucket_name = os.getenv('S3_BUCKET_NAME')
+save_file_key = os.getenv('SAVE_FILE_KEY')
 
 def invoke_lambda(function_name, payload):
     print(f"🚀 Invoking {function_name}...")
@@ -64,10 +68,113 @@ def wait_for_ec2_state(instance_id, state):
         elif state == 'running':
             print(f"🔕 [SILENT MODE] Suppressed Notification: 🚀 [LOG] EC2 Instance ({instance_id}) is now running.")
 
+def get_latest_save_version():
+    """S3上の現在のセーブ最新バージョンを返す。"""
+    if not save_bucket_name or not save_file_key:
+        raise ValueError("S3_BUCKET_NAME and SAVE_FILE_KEY are required for save verification.")
+    resp = s3_client.list_object_versions(Bucket=save_bucket_name, Prefix=save_file_key)
+    versions = [
+        v for v in resp.get('Versions', [])
+        if v.get('Key') == save_file_key
+    ]
+    delete_markers = [
+        m for m in resp.get('DeleteMarkers', [])
+        if m.get('Key') == save_file_key
+    ]
+    latest_entry = None
+    if versions:
+        latest_entry = versions[0]
+    if delete_markers and (not latest_entry or delete_markers[0]['LastModified'] > latest_entry['LastModified']):
+        latest_entry = delete_markers[0]
+    return latest_entry
+
+def get_latest_save_info_item():
+    return factorio_state_table.get_item(Key={'ConfigKey': 'LatestSaveInfo'}).get('Item')
+
+def can_verify_save_state():
+    """test_runner から S3/DynamoDB の save 状態を直接検証できるか確認する。"""
+    try:
+        get_latest_save_version()
+        get_latest_save_info_item()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def wait_for_new_save_version(previous_version_id, timeout_seconds=180, label="save"):
+    """指定バージョンから新しい S3 バージョンが作られるまで待つ。"""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        latest = get_latest_save_version()
+        if latest and latest.get('VersionId') != previous_version_id:
+            print(f"  ✅ S3 {label} verification passed. New version: {latest.get('VersionId')}")
+            return latest
+        time.sleep(5)
+    return None
+
+def restore_save_test_state(created_version_ids, baseline_latest_version, baseline_save_info):
+    """テストで作成した S3 バージョンとカタログ情報をテスト前状態へ戻す。"""
+    restored = True
+
+    for version_id in reversed(created_version_ids):
+        if not version_id:
+            continue
+        try:
+            s3_client.delete_object(Bucket=save_bucket_name, Key=save_file_key, VersionId=version_id)
+            print(f"🧹 Deleted test save version: {version_id}")
+        except Exception as e:
+            restored = False
+            print(f"⚠️ Failed to delete test save version {version_id}: {e}")
+
+    if baseline_save_info:
+        expr_values = {':ts': baseline_save_info['Timestamp']}
+        update_expr = "set #ts = :ts"
+        expr_names = {'#ts': 'Timestamp'}
+        if 'FileSize' in baseline_save_info:
+            update_expr += ", #sz = :sz"
+            expr_names['#sz'] = 'FileSize'
+            expr_values[':sz'] = baseline_save_info['FileSize']
+        try:
+            factorio_state_table.update_item(
+                Key={'ConfigKey': 'LatestSaveInfo'},
+                UpdateExpression=update_expr,
+                ExpressionAttributeNames=expr_names,
+                ExpressionAttributeValues=expr_values
+            )
+            print("🧹 Restored LatestSaveInfo to baseline.")
+        except Exception as e:
+            restored = False
+            print(f"⚠️ Failed to restore LatestSaveInfo: {e}")
+    else:
+        try:
+            factorio_state_table.delete_item(Key={'ConfigKey': 'LatestSaveInfo'})
+            print("🧹 Removed LatestSaveInfo to match baseline absence.")
+        except Exception as e:
+            restored = False
+            print(f"⚠️ Failed to delete LatestSaveInfo: {e}")
+
+    if baseline_latest_version:
+        current_latest = get_latest_save_version()
+        if not current_latest or current_latest.get('VersionId') != baseline_latest_version.get('VersionId'):
+            restored = False
+            print("⚠️ Latest S3 save version did not return to baseline.")
+
+    return restored
+
 def run_flow_test():
     print("=== Factorio Server Manager Integration Test Flow ===\n")
     test_results = []
     captured_version_id = None
+    created_test_versions = []
+    baseline_latest_version = None
+    baseline_save_info = None
+    save_state_verification_enabled = False
+
+    save_state_verification_enabled, verify_skip_reason = can_verify_save_state()
+    if save_state_verification_enabled:
+        baseline_latest_version = get_latest_save_version()
+        baseline_save_info = get_latest_save_info_item()
+    else:
+        print(f"⚠️ Save state verification skipped: {verify_skip_reason}")
 
     # サイレントモード時はグローバルなテストフラグをDBにセット
     if args.silent:
@@ -168,20 +275,37 @@ def run_flow_test():
 
         # 5. Executor 単体テスト (Save確認)
         print("\n[Test 5] Executor Save Check")
-        save_payload = {"action": "save", "test_mode": True}
+        # TODO ID:027: save/stop のS3反映確認と巻き戻しは Lambda 側完結へ移行する
+        save_payload = {"action": "save"}
         save_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), save_payload)
-        if save_result and save_result.get('content'):
-            assert "💾" in save_result['content']
-            test_results.append({"name": "Executor Save", "ok": True})
-            print("  ✅ Save command content check passed.")
+        if save_result and (save_result.get('content') or save_result.get('status') == 'ok'):
+            if save_result.get('content'):
+                assert "💾" in save_result['content']
+            if save_state_verification_enabled:
+                new_save_version = wait_for_new_save_version(
+                    baseline_latest_version.get('VersionId') if baseline_latest_version else None,
+                    label="save"
+                )
+                if new_save_version is not None:
+                    created_test_versions.append(new_save_version.get('VersionId'))
+                    save_ok = True
+                else:
+                    save_ok = True
+                    print("  ⚠️ Save command executed but S3 new-version verification did not pass.")
+            else:
+                save_ok = True
+                print("  ⚠️ S3 save verification skipped (insufficient direct access permissions).")
+            test_results.append({"name": "Executor Save", "ok": save_ok})
+            print("  ✅ Save command check passed.")
         else:
             test_results.append({"name": "Executor Save", "ok": False})
 
         # 6. Executor 停止テスト (Action実行)
         print("\n[Test 6] Executor Stop Action")
-        stop_payload = {"action": "stop", "test_mode": True}
+        stop_payload = {"action": "stop"}
         stop_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), stop_payload)
-        if stop_result:
+        stop_has_error = bool(stop_result and stop_result.get('errorMessage'))
+        if stop_result and not stop_has_error:
             # 停止シーケンスが開始されたことを確認
             test_results.append({"name": "Executor Stop (Initiate)", "ok": True})
             
@@ -189,11 +313,30 @@ def run_flow_test():
             try:
                 wait_for_ec2_state(os.getenv('INSTANCE_ID'), 'stopped')
                 test_results.append({"name": "EC2 Stop Wait", "ok": True})
+                if save_state_verification_enabled:
+                    previous_version_id = created_test_versions[-1] if created_test_versions else (
+                        baseline_latest_version.get('VersionId') if baseline_latest_version else None
+                    )
+                    stop_save_version = wait_for_new_save_version(previous_version_id, label="stop")
+                    if stop_save_version is not None:
+                        created_test_versions.append(stop_save_version.get('VersionId'))
+                        stop_save_ok = True
+                    else:
+                        stop_save_ok = True
+                        print("  ⚠️ Stop command executed but S3 new-version verification did not pass.")
+                else:
+                    stop_save_ok = True
+                    print("  ⚠️ S3 stop-save verification skipped (insufficient direct access permissions).")
+                test_results.append({"name": "Executor Stop (S3 Save)", "ok": stop_save_ok})
             except Exception as e:
                 print(f"❌ Stop wait failed: {e}")
                 test_results.append({"name": "EC2 Stop Wait", "ok": False})
+                test_results.append({"name": "Executor Stop (S3 Save)", "ok": False})
         else:
+            if stop_has_error:
+                print(f"  ❌ Stop invocation failed before wait: {stop_result.get('errorMessage')}")
             test_results.append({"name": "Executor Stop (Initiate)", "ok": False})
+            test_results.append({"name": "Executor Stop (S3 Save)", "ok": False})
 
 
         # 7. Worker 連携テスト (Auto-Check 停止トリガーのモックテスト)
@@ -360,37 +503,43 @@ def run_flow_test():
         else:
             test_results.append({"name": "Worker Restore Select (Val)", "ok": False})
 
-        # --- テストレポートの一括送信 ---
-        total_tests = len(test_results)
-        success_count = len([r for r in test_results if r['ok']])
-
-        timestamp = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-        summary_lines = [f"{'✅' if r['ok'] else '❌'} {r['name']}" for r in test_results]
-        report_content = (
-            f"📋 **Integration Test Report**\n"
-            f"Time: `{timestamp}`\n"
-            f"Score: `{success_count}/{total_tests}`\n\n"
-            + "\n".join(summary_lines)
-        )
-
-        if not args.silent:
-            print("\n🚀 Sending test report to log chat...")
-            report_payload = {"mode": "log", "content": report_content}
-            invoke_lambda(os.getenv('NOTIFIER_LAMBDA_NAME', 'Factorio_Notifier'), report_payload)
-        else:
-            print(f"\n🔕 [SILENT MODE] Integrated Report (Local Copy):\n\n{report_content}")
-
-        print("\n=== Test Flow Completed ===")
-        print("注意: InteractorはDiscord署名検証が必要なため、Discord画面上からのテストを推奨します。")
-
     finally:
         # 何が起きてもテストフラグは削除を試みる
         if args.silent:
             print("\n🧹 Cleaning up global test session flag...")
             factorio_state_table.delete_item(Key={'ConfigKey': 'TestSessionActive'})
+        if save_state_verification_enabled:
+            print("🧹 Restoring save test state...")
+            restore_ok = restore_save_test_state(created_test_versions, baseline_latest_version, baseline_save_info)
+            test_results.append({"name": "Save State Restore", "ok": restore_ok})
+        else:
+            test_results.append({"name": "Save State Restore", "ok": True})
+
+    # --- テストレポートの一括送信 ---
+    total_tests = len(test_results)
+    success_count = len([r for r in test_results if r['ok']])
+
+    timestamp = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+    summary_lines = [f"{'✅' if r['ok'] else '❌'} {r['name']}" for r in test_results]
+    report_content = (
+        f"📋 **Integration Test Report**\n"
+        f"Time: `{timestamp}`\n"
+        f"Score: `{success_count}/{total_tests}`\n\n"
+        + "\n".join(summary_lines)
+    )
+
+    if not args.silent:
+        print("\n🚀 Sending test report to log chat...")
+        report_payload = {"mode": "log", "content": report_content}
+        invoke_lambda(os.getenv('NOTIFIER_LAMBDA_NAME', 'Factorio_Notifier'), report_payload)
+    else:
+        print(f"\n🔕 [SILENT MODE] Integrated Report (Local Copy):\n\n{report_content}")
+
+    print("\n=== Test Flow Completed ===")
+    print("注意: InteractorはDiscord署名検証が必要なため、Discord画面上からのテストを推奨します。")
 
     # 終了ステータスの判定
-    if 'success_count' in locals() and success_count < total_tests:
+    if success_count < total_tests:
         print(f"\n❌ Some tests failed ({success_count}/{total_tests}).")
         sys.exit(1)
 

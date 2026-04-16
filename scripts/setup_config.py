@@ -13,16 +13,17 @@ def setup_configs():
     
     if os.path.exists(env_path):
         print(f"📖 Loading environment: {env_file}")
-        load_dotenv(env_path)
+        load_dotenv(env_path, override=True)
     else:
         print(f"⚠️  Environment file {env_file} not found, falling back to default .env")
-        load_dotenv(os.path.join(BASE_DIR, ".env"))
+        load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
     # 環境変数名とプレースホルダーの対応定義
     env_mapping = {
         'AWS_REGION': "<REGION>",
         'AWS_ACCOUNT_ID': "<ACCOUNT_ID>",
         'SSM_PARAMETER_PATH': "<SSM_PARAMETER_PATH>",
+        'DYNAMODB_TABLE_NAME': "<DYNAMODB_TABLE_NAME>",
         'INSTANCE_ID': "<INSTANCE_ID>",
         'S3_BUCKET_NAME': "<S3_BUCKET_NAME>",
         'SAVE_FILE_KEY': "<SAVE_FILE_KEY>",
@@ -35,6 +36,9 @@ def setup_configs():
         'WORKER_ROLE_NAME': "<WORKER_ROLE_NAME>",
         'NOTIFIER_ROLE_NAME': "<NOTIFIER_ROLE_NAME>",
         'EVENTBRIDGE_ROLE_NAME': "<EVENTBRIDGE_ROLE_NAME>",
+        'EC2_SERVER_ROLE_NAME': "<EC2_SERVER_ROLE_NAME>",
+        'EC2_SERVER_PROFILE_NAME': "<EC2_SERVER_PROFILE_NAME>",
+        'S3_FILES_SERVICE_ROLE_NAME': "<S3_FILES_SERVICE_ROLE_NAME>",
         'INTERACT_POLICY_NAME': "<INTERACT_POLICY_NAME>",
         'EXECUTE_POLICY_NAME': "<EXECUTE_POLICY_NAME>",
         'NOTIFY_POLICY_NAME': "<NOTIFY_POLICY_NAME>",
@@ -47,9 +51,15 @@ def setup_configs():
     replacements = {}
     missing_vars = []
 
+    default_values = {
+        'INTERACTOR_LAMBDA_NAME': 'Factorio_Interactor',
+        'EC2_SERVER_ROLE_NAME': 'EC2-Factorio-Server-Role',
+        'EC2_SERVER_PROFILE_NAME': 'EC2-Factorio-Server-Profile',
+        'S3_FILES_SERVICE_ROLE_NAME': 'FactorioS3FilesServiceRole',
+    }
+
     for env_key, placeholder in env_mapping.items():
-        # INTERACTOR_LAMBDA_NAME はデフォルト値を持つため、None にならない
-        default = 'Factorio_Interactor' if env_key == 'INTERACTOR_LAMBDA_NAME' else None
+        default = default_values.get(env_key)
         val = os.getenv(env_key, default)
 
         if val is None:

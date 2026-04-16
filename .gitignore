@@ -6,3 +6,5 @@ __pycache__/
 /.deploy_state/
 aws/Lambda/*/archive.zip
 aws/IAM/*/policy.json
+pem/
+data/

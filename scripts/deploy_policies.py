@@ -16,10 +16,11 @@ def deploy_policies():
     
     if os.path.exists(env_path):
         print(f"📖 Loading environment: {env_file}")
-        load_dotenv(env_path)
+        # 先に読み込まれた .env 値があっても、対象環境の値を優先する
+        load_dotenv(env_path, override=True)
     else:
         print(f"⚠️  Environment file {env_file} not found, falling back to default .env")
-        load_dotenv(os.path.join(BASE_DIR, ".env"))
+        load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
     # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
     if os.getenv('AUTO_CONFIRM') != '1':
@@ -141,8 +142,9 @@ def deploy_policies():
 if __name__ == "__main__":
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # 認証チェックの前に .env を読み込む
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
+    env_file = ".env" if env_arg == "prod" else f".env.{env_arg}"
+    load_dotenv(os.path.join(BASE_DIR, env_file), override=True)
 
     if not boto3.Session().get_credentials():
         print("⚠️  Warning: AWS credentials not found. Boto3 might fail to authenticate.")

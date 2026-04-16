@@ -101,8 +101,16 @@ def update_admin_config():
             admin_config["command_routing"] = {}
 
         admin_config["executor_lambda"] = params.get('executor_lambda_name', 'Factorio_Executor')
-        admin_config["worker_lambda"] = params.get('worker_lambda', 'Factorio_Worker')
-        admin_config["notifier_lambda"] = params.get('notifier_lambda', 'Factorio_Notifier')
+        admin_config["worker_lambda"] = (
+            params.get('worker_lambda_name')
+            or params.get('worker_lambda')
+            or 'Factorio_Worker'
+        )
+        admin_config["notifier_lambda"] = (
+            params.get('notifier_lambda_name')
+            or params.get('notifier_lambda')
+            or 'Factorio_Notifier'
+        )
 
         admin_config["initialized"] = True
         print("Admin config updated from SSM")
@@ -139,10 +147,19 @@ def is_authorized(command_path, user_id, user_roles):
 
 def lambda_handler(event, context):
     # 1. 署名検証
-    headers = event.get('headers', {})
+    raw_headers = event.get('headers') or {}
+    headers = {
+        str(k).lower(): v
+        for k, v in raw_headers.items()
+        if isinstance(k, str)
+    }
     signature = headers.get('x-signature-ed25519')
     timestamp = headers.get('x-signature-timestamp')
     body = event.get('body', '')
+
+    if not signature or not timestamp:
+        print("❌ Signature headers missing: x-signature-ed25519 or x-signature-timestamp")
+        return {'statusCode': 401, 'body': 'Missing request signature headers'}
 
     # 署名検証用の公開鍵を取得（SSM へのアクセスを避けるためキャッシュまたは環境変数から）
     public_key = admin_config["discord_public_key"] or os.getenv('DISCORD_PUBLIC_KEY')

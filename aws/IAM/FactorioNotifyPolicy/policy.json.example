@@ -8,7 +8,7 @@
                 "ssm:GetParameter"
             ],
             "Resource": [
-                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/*"
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter<SSM_PARAMETER_PATH>*"
             ]
         }
     ]

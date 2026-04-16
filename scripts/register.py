@@ -16,10 +16,10 @@ env_path = os.path.join(BASE_DIR, env_file)
 
 if os.path.exists(env_path):
     print(f"📖 Loading environment: {env_file}")
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
 else:
     print(f"⚠️  Environment file {env_file} not found, falling back to default .env")
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
 # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
 if os.getenv('AUTO_CONFIRM') != '1':
@@ -72,10 +72,12 @@ SECRETS_TO_SYNC = {
     'FACTORIO_GAME_PORT': f'{SSM_BASE}FACTORIO_GAME_PORT',
     'RCON_COMMAND_TIMEOUT_SECONDS': f'{SSM_BASE}RCON_COMMAND_TIMEOUT_SECONDS',
     'RCON_UNRESPONSIVE_THRESHOLD': f'{SSM_BASE}RCON_UNRESPONSIVE_THRESHOLD',
+    # TODO ID:002: 無人判定をMIN_IDLE_MINUTESへ移行
     'ZERO_PLAYER_THRESHOLD': f'{SSM_BASE}ZERO_PLAYER_THRESHOLD',
     'S3_SYNC_WAIT_THRESHOLD_SECONDS': f'{SSM_BASE}S3_SYNC_WAIT_THRESHOLD_SECONDS',
     'RCON_READY_CHECK_INTERVAL_SECONDS': f'{SSM_BASE}RCON_READY_CHECK_INTERVAL_SECONDS',
     'RCON_READY_CHECK_MAX_ATTEMPTS': f'{SSM_BASE}RCON_READY_CHECK_MAX_ATTEMPTS',
+    # TODO ID:006: ハイブリッド運用向けにSERVER_RUN_MODE/INSTANCE_PROVISIONING_TYPE/LAUNCH_TEMPLATE関連キーを追加
 }
 
 def register_commands():
@@ -263,6 +265,7 @@ def sync_secrets_to_ssm():
                     continue
 
             print(f"🔄 Syncing {env_key} to {ssm_path}...")
+            # TODO ID:001: 非機密SSMはStringで保存
             ssm.put_parameter(
                 Name=ssm_path,
                 Value=value,

@@ -18,7 +18,7 @@ def update_eventbridge_resources():
         print(f"❌ Environment file {env_file} not found.")
         sys.exit(1)
 
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
     
     # 1. 実行確認 (AUTO_CONFIRM が設定されていない場合のみ)
     if os.getenv('AUTO_CONFIRM') != '1':
@@ -50,9 +50,15 @@ def update_eventbridge_resources():
     daily_stop_name = os.getenv('DAILY_STOP_SCHEDULE_NAME', f"Factorio-DailyStop{suffix}")
     rule_name = os.getenv('EC2_STATE_RULE_NAME', f"Factorio-EC2StateChange{suffix}")
     
+    def with_suffix(base_name, suffix_value):
+        """Suffix重複を避けて名前を組み立てる。"""
+        if not suffix_value:
+            return base_name
+        return base_name if base_name.endswith(suffix_value) else f"{base_name}{suffix_value}"
+
     # スケジューラ用IAMロール名 (環境変数から取得)
     base_eb_role = os.getenv('EVENTBRIDGE_ROLE_NAME', 'FactorioEventBridgeRole')
-    eb_role_name = f"{base_eb_role}{suffix}"
+    eb_role_name = with_suffix(base_eb_role, suffix)
     
     # スケジュール式の取得
     auto_check_expr = os.getenv('AUTO_CHECK_SCHEDULE', 'rate(5 minutes)')
@@ -128,13 +134,26 @@ def update_eventbridge_resources():
             )
             print(f"✅ Successfully updated {sch['Name']}")
         except scheduler.exceptions.ResourceNotFoundException:
-            print(f"⚠️  Schedule {sch['Name']} not found. Please run init_aws_resources.py first.")
+            print(f"🆕 Schedule {sch['Name']} not found. Creating...")
+            scheduler.create_schedule(
+                Name=sch['Name'],
+                ScheduleExpression=sch['Expression'],
+                State='ENABLED',
+                Target={
+                    'Arn': sch['TargetArn'],
+                    'RoleArn': role_arn,
+                    'Input': sch['Input']
+                },
+                FlexibleTimeWindow={'Mode': 'OFF'}
+            )
+            print(f"✅ Successfully created {sch['Name']}")
         except Exception as e:
             print(f"❌ Failed to update {sch['Name']}: {e}")
 
     # 2. EventBridge Rule (EC2 State Change) の更新 (INSTANCE_ID 変更の反映)
     try:
         # 現在のルールとターゲットの状態を取得
+        current_rule = {'State': 'ENABLED'}
         try:
             current_rule = events.describe_rule(Name=rule_name)
             current_pattern_dict = json.loads(current_rule.get('EventPattern', '{}'))
@@ -247,7 +266,21 @@ def update_eventbridge_resources():
             print(f"⚠️  Could not update Lambda permission: {perm_err}")
             
     except events.exceptions.ResourceNotFoundException:
-        print(f"⚠️  Event Rule {rule_name} not found. Please run init_aws_resources.py first.")
+        print(f"🆕 Event Rule {rule_name} not found. Creating...")
+        events.put_rule(
+            Name=rule_name,
+            EventPattern=json.dumps({
+                "source": ["aws.ec2"],
+                "detail-type": ["EC2 Instance State-change Notification"],
+                "detail": {
+                    "instance-id": [instance_id],
+                    "state": sorted(["running", "stopped"])
+                }
+            }),
+            State='ENABLED'
+        )
+        events.put_targets(Rule=rule_name, Targets=[{'Id': '1', 'Arn': f"arn:aws:lambda:{region}:{account_id}:function:{executor_lambda_name}", 'RoleArn': role_arn}])
+        print(f"✅ Successfully created {rule_name}")
     except Exception as e:
         print(f"❌ Failed to update {rule_name}: {e}")
 
@@ -257,7 +290,7 @@ if __name__ == "__main__":
         if not boto3.Session().get_credentials() and not os.getenv('AWS_PROFILE'):
             BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
-            load_dotenv(os.path.join(BASE_DIR, ".env" if env_arg == "prod" else f".env.{env_arg}"))
+            load_dotenv(os.path.join(BASE_DIR, ".env" if env_arg == "prod" else f".env.{env_arg}"), override=True)
         
         update_eventbridge_resources()
     except Exception as e:

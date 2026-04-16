@@ -37,6 +37,7 @@ GLOBAL_TEXT_RESOURCES = {
         }
     },
     "start": {
+        # // TASK [UI]: 起動待機がタイムアウトした際にこのメッセージが返され、ユーザーが起動完了と誤認してしまうため、「起動に時間がかかっています。後で /status を確認してください」等の具体的な案内に変更する
         "success": {"ja": "🚀 サーバーの起動を開始しました。", "en": "🚀 Starting server..."},
         "already": {"ja": "⚠️ サーバーは既に起動しているか、準備中です。", "en": "⚠️ Server is already running or pending."},
         "completed": {
@@ -120,6 +121,7 @@ def fetch_config_from_ssm(path=None):
     try:
         # パス配下のパラメータを取得
         paginator = ssm.get_paginator('get_parameters_by_path')
+        # TODO ID:004: String化後の一括取得互換性を確認
         for page in paginator.paginate(Path=path, WithDecryption=True):
             for p in page['Parameters']:
                 key = p['Name'].split('/')[-1].lower()

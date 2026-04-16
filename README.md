@@ -90,7 +90,8 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 本プロジェクトでは、最小権限の原則に基づき、管理用ポリシー（`FactorioRegistPolicy`）で操作可能なリソースを名前の前方一致で制限しています。`.env` で独自の名前を設定する場合は、以下の接頭辞を維持してください。
 
 - **S3 バケット**: `factorio-` で始まる必要があります（例: `factorio-storage-xxx`）。
-- **DynamoDB / Lambda / IAM**: `Factorio` で始まる必要があります（例: `FactorioState`, `Factorio_Executor`）。
+- **DynamoDB / Lambda / IAM**: 原則 `Factorio` で始まる必要があります（例: `FactorioState`, `Factorio_Executor`）。  
+  例外として EC2 管理対象ロール/プロファイルは `EC2-Factorio-*` 命名にも対応しています。
 - **EventBridge / Scheduler**: 自動的に `Factorio-` 接頭辞が付与されます。
 
 ## ✅ 開発者向けセットアップ・チェックリスト
@@ -107,13 +108,13 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 ### 2. AWS 側の準備
 - [ ] 使用する `AWS_REGION` を決定する (例: `ap-northeast-1`)
 - [ ] `AWS_ACCOUNT_ID` を確認する
-- [ ] 管理対象となる EC2 インスタンスを起動し、`INSTANCE_ID` を取得する
+- [ ] 管理対象となる EC2 インスタンスを起動し、`INSTANCE_ID` を取得する（既存サーバーを流用する場合も同様）
 - [ ] **[決定]** 作成する S3 バケット名、DynamoDB テーブル名、Lambda 関数名、IAM ポリシー名を決める
 
 ### 3. ローカル環境の構築
 - [ ] `python --version` が 3.12 以上であることを確認する
 - [ ] `.env.example` をコピーして `.env` (本番) または `.env.dev` (開発) を作成する
-- [ ] 上記で収集・決定した値を `.env` に記入する (`S3_FILES_SYSTEM_ID` は後ほど EC2 設定時に追記で可)
+- [ ] 上記で収集・決定した値を `.env` に記入する（`S3_FILES_SYSTEM_ID` は `init_aws_resources` 後に `aws s3files list-file-systems` で確認し、`.env` / `.env.dev` に追記する。詳細は下記「### 2. AWS：インフラリソースの構築」内の手順参照）
 - [ ] `pip install -r requirements.txt` を実行して依存関係をインストールする
 - [ ] `aws configure --profile <name>` で、適切な権限を持つプロファイルを作成する
 
@@ -121,6 +122,7 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 - [ ] `python scripts/check_env_leaks.py <env>` を実行し、機密情報の漏洩がないか確認する
 - [ ] `python scripts/init_aws_resources.py <env>` を実行して、AWS上にベースリソースを作成する
 - [ ] `python scripts/setup_config.py` を実行して、環境に合わせた IAM ポリシーファイルを生成する
+- [ ] Interactor Lambda に PyNaCl を含む Layer をアタッチする（デプロイ後に Layer 設定を確認）
 - [ ] `python scripts/deploy_all.py <env> --silent` を実行して、全コンポーネントをデプロイし、通知を飛ばさずにテストを完走させる
 - [ ] `python scripts/test_runner.py` を実行して、システム全体の疎通を確認する
 
@@ -132,12 +134,98 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 1. **[ローカル]** `.env.example` をコピーして `.env` または `.env.dev` を作成し、必要な設定値を入力する。
 2. **[ローカル]** `pip install -r requirements.txt` を実行して依存ライブラリをインストールする。
 3. **[ローカル]** `aws configure --profile <profile_name>` を実行（開発用なら `factorio-dev`、本番用なら `factorio-prod` 等）し、適切な権限を持つプロファイルを作成する。
-4. **[ローカル]** `python scripts/check_env_leaks.py <env>` を実行し、Git履歴に機密情報が含まれていないか確認する。
 
 ### 2. AWS：インフラリソースの構築
 1. **[ローカル]** `python scripts/init_aws_resources.py <env>` を実行し、S3, DynamoDB, IAM Role, EventBridge, Lambda の器を自動作成する。
+   - `S3_FILES_SYSTEM_ID` が未設定の場合、S3 Files 用 IAM ロール（`S3_FILES_SERVICE_ROLE_NAME`、既定 `FactorioS3FilesServiceRole`）を用意したうえで、AWS CLI (`s3files create-file-system`) によりファイルシステム作成を試行します。初回は `setup_config.py` と `deploy_policies.py` で Regist ポリシー更新後に再実行してください。
+   - **ファイルシステム ID の確認**: 作成の成否にかかわらず、次で一覧し、`.env` の `S3_BUCKET_NAME` に対応する行の `fileSystemId`（`fs-...`）を控える（複数環境がある場合はバケット ARN で見分ける）。
+
+```powershell
+aws s3files list-file-systems --profile <profile_name> --region <REGION> --output table
+```
+
+   - **`.env` への反映**: 控えた `fs-...` を `.env` または `.env.dev` の `S3_FILES_SYSTEM_ID` に設定する（EC2 の `/etc/fstab` のマウント元と同じ値にする）。
+   - 既存EC2があり `INSTANCE_ID` が `.env` に設定されている場合、EC2用ロール/インスタンスプロファイル（例: `EC2-Factorio-Server-Role-dev`）の作成・アタッチまで実施されます。
 2. **[ローカル]** `python scripts/setup_config.py <env>` を実行して、環境に合わせた実際の IAM ポリシーファイルをローカルに生成する。
 3. **[ローカル]** `python scripts/deploy_policies.py <env>` を実行して、生成したポリシーを AWS へ適用する。
+4. **[Lambda]** Interactor 関数に PyNaCl を含む Layer が設定されていることを確認する（未設定ならコンソールまたは CLI で Layer を追加）。
+5. **[API Gateway]** Discord Interactions 受け口（`POST /interactions`）を手動で作成し、`Factorio_Interactor-<env>` に接続する。
+
+#### API Gateway 手動作成（初回のみ）
+
+`apigatewayv2` の `create-api` は `FactorioRegistUser-dev` などの管理ユーザーに `apigateway:POST` 権限が必要です。  
+権限不足の場合は、上位権限ユーザーで一度だけ作成してください。
+
+PowerShell で ARN 文字列を組み立てるときは `"$REGION:$ACCOUNT_ID"` のような表記で構文エラーになるため、`${REGION}` の形式を使用してください。
+
+```powershell
+# 例: dev
+$AWS_PROFILE = "factorio-dev"
+$REGION = "ap-northeast-1"
+$ACCOUNT_ID = "<ACCOUNT_ID>"
+$LAMBDA_NAME = "Factorio_Interactor-dev"
+$API_NAME = "FactorioControlAPI-dev"
+
+# 1) HTTP API 作成
+$API_ID = aws apigatewayv2 create-api `
+  --name $API_NAME `
+  --protocol-type HTTP `
+  --profile $AWS_PROFILE `
+  --region $REGION `
+  --query "ApiId" `
+  --output text
+
+# 2) Lambda統合
+$LAMBDA_ARN = "arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${LAMBDA_NAME}"
+$INTEGRATION_ID = aws apigatewayv2 create-integration `
+  --api-id $API_ID `
+  --integration-type AWS_PROXY `
+  --integration-uri $LAMBDA_ARN `
+  --payload-format-version "2.0" `
+  --profile $AWS_PROFILE `
+  --region $REGION `
+  --query "IntegrationId" `
+  --output text
+
+# 3) ルート作成
+aws apigatewayv2 create-route `
+  --api-id $API_ID `
+  --route-key "POST /interactions" `
+  --target "integrations/$INTEGRATION_ID" `
+  --profile $AWS_PROFILE `
+  --region $REGION
+
+# 4) ステージ作成
+aws apigatewayv2 create-stage `
+  --api-id $API_ID `
+  --stage-name '$default' `
+  --auto-deploy `
+  --profile $AWS_PROFILE `
+  --region $REGION
+
+# 5) API Gateway -> Lambda invoke 許可
+$SOURCE_ARN = "arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/POST/interactions"
+aws lambda add-permission `
+  --function-name $LAMBDA_NAME `
+  --statement-id "AllowInvokeFromApiGateway-$API_ID" `
+  --action "lambda:InvokeFunction" `
+  --principal "apigateway.amazonaws.com" `
+  --source-arn $SOURCE_ARN `
+  --profile $AWS_PROFILE `
+  --region $REGION
+
+# 6) Discord に設定する URL
+$API_ENDPOINT = aws apigatewayv2 get-api `
+  --api-id $API_ID `
+  --profile $AWS_PROFILE `
+  --region $REGION `
+  --query "ApiEndpoint" `
+  --output text
+
+Write-Host "$API_ENDPOINT/interactions"
+```
+
+この URL を Discord Developer Portal の dev アプリ `Interactions Endpoint URL` に設定し、最後に `python scripts/register.py dev` を実行して反映してください。
 
 ### 3. サーバー：EC2 側及びデータの初期化
 1. **[インフラ]** EC2 インスタンスのセキュリティグループにて、Lambda からの RCON 通信 (TCP 27015) を許可する。

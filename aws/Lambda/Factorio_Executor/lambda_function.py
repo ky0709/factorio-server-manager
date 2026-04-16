@@ -18,6 +18,29 @@ config = {"initialized": False}
 factorio_state_table = None
 _suppressed_logs = []
 
+def update_latest_save_info(timestamp_iso):
+    """最新セーブの時刻とサイズをカタログへ保存する。"""
+    expr_names = {'#ts': 'Timestamp'}
+    expr_values = {':val': timestamp_iso}
+    update_expr = "set #ts = :val"
+
+    try:
+        s3 = get_client('s3')
+        s3_meta = s3.head_object(Bucket=config['s3_bucket_name'], Key=config['save_file_key'])
+        size_mb = round(s3_meta.get('ContentLength', 0) / (1024 * 1024), 1)
+        update_expr += ", #sz = :sz"
+        expr_names['#sz'] = 'FileSize'
+        expr_values[':sz'] = str(size_mb)
+    except Exception as e:
+        print(f"⚠️ Could not fetch save size for LatestSaveInfo update: {e}")
+
+    factorio_state_table.update_item(
+        Key={'ConfigKey': 'LatestSaveInfo'},
+        UpdateExpression=update_expr,
+        ExpressionAttributeNames=expr_names,
+        ExpressionAttributeValues=expr_values
+    )
+
 def init_config():
     try:
         global _suppressed_logs
@@ -178,6 +201,7 @@ def handle_status(event, ec2, inst, state, ip, locale):
         return get_msg("status", "transition", locale, state=state, save_time=display_save_time, size=save_size)
 
 def handle_start(event, ec2, inst, state, ip, locale):
+        # TODO ID:006: SERVER_RUN_MODE=STATIC/DYNAMICで起動方式を分岐し、DYNAMIC時は起動テンプレート(run_instances)で作成したInstanceIdをセッション管理へ保存する
         if state == 'stopped':
             # 1. パスワードの取得または生成
             # SSMにあるのは「設定（固定か空か）」、DynamoDBに保存するのが「現在のセッション用」と分離します
@@ -272,6 +296,8 @@ def handle_start(event, ec2, inst, state, ip, locale):
         return get_msg("start", "already", locale)
 
 def handle_stop(event, ec2, inst, state, ip, locale):
+        # TODO ID:006: SERVER_RUN_MODE=STATICはstop_instances、DYNAMICはterminate_instancesへ分岐し、終了対象InstanceIdをセッション情報から解決する
+        # TODO ID:027: save/stop の S3 反映確認と巻き戻しは test_runner 直アクセスではなく Lambda 側完結で実装する
         if state == 'running':
             start_stop_time = time.time()
 
@@ -292,12 +318,7 @@ def handle_stop(event, ec2, inst, state, ip, locale):
                 run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
                 
                 # カタログ (DynamoDB) を更新
-                factorio_state_table.update_item(
-                    Key={'ConfigKey': 'LatestSaveInfo'},
-                    UpdateExpression="set #ts = :val",
-                    ExpressionAttributeNames={'#ts': 'Timestamp'},
-                    ExpressionAttributeValues={':val': datetime.now(JST).isoformat()}
-                )
+                update_latest_save_info(datetime.now(JST).isoformat())
             else:
                 print("DEBUG: [Test Mode] Skipping RCON save and catalog update in stop sequence.")
 
@@ -337,17 +358,12 @@ def handle_stop(event, ec2, inst, state, ip, locale):
 
 def handle_save(event, ec2, inst, state, ip, locale):
         if state != 'running': return get_msg("common", "server_offline", locale)
-        
+        # TODO ID:027: save 完了判定で新規 S3 version 作成確認を Lambda 側で返せるようにする
         # テストモード以外の場合のみ、実際のセーブ処理を実行
         if not config.get("test_mode"):
             run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
             # カタログ (DynamoDB) を更新
-            factorio_state_table.update_item(
-                Key={'ConfigKey': 'LatestSaveInfo'},
-                UpdateExpression="set #ts = :val",
-                ExpressionAttributeNames={'#ts': 'Timestamp'},
-                ExpressionAttributeValues={':val': datetime.now(JST).isoformat()}
-            )
+            update_latest_save_info(datetime.now(JST).isoformat())
         else:
             print("DEBUG: [Test Mode] Skipping RCON save and catalog update.")
         return get_msg("save", "success", locale)
@@ -409,7 +425,13 @@ ACTION_HANDLERS = {
 def execute_ec2_command(action, event):
     locale = event.get('locale', 'ja')
     ec2 = get_client('ec2')
-    inst = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
+    instance_id = (config.get('instance_id') or '').strip().strip("'\"")
+    if not instance_id:
+        print(f"❌ INSTANCE_ID is missing. SSM_PARAMETER_PATH={os.getenv('SSM_PARAMETER_PATH', '/factorio/')}")
+        # TODO ID:031: 設定不備エラーのユーザー向け応答を locale に応じて日本語/英語で返す
+        return "❌ サーバー設定の取得に失敗しました。管理者に設定内容の確認を依頼してください。"
+    # TODO ID:006: DYNAMIC対応時は固定config['instance_id']前提を廃止し、現在アクティブなInstanceIdをDynamoDB等から解決する
+    inst = ec2.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
     state = inst['State']['Name']
     ip = inst.get('PublicIpAddress')
 

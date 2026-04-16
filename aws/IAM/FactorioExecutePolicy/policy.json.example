@@ -36,7 +36,7 @@
                 "ssm:PutParameter"
             ],
             "Resource": [
-                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter/factorio/*"
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter<SSM_PARAMETER_PATH>*"
             ]
         },
         {
@@ -66,7 +66,7 @@
                 "dynamodb:UpdateItem",
                 "dynamodb:DeleteItem"
             ],
-            "Resource": "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/FactorioState"
+            "Resource": "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/<DYNAMODB_TABLE_NAME>"
         },
         {
             "Sid": "AllowS3AccessForStatus",

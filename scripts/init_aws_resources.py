@@ -22,23 +22,12 @@ def main():
         print(f"❌ Environment file {env_file} not found.")
         sys.exit(1)
 
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
     
-    # 個別実行時、または deploy_all --only init の場合は setup_config.py を事前に実行
-    if os.getenv('SETUP_CONFIG_DONE') != '1':
-        print(f"\n⚙️  Generating configuration files from templates ({env_arg})...")
-        python_exe = sys.executable
-        setup_script = os.path.join(BASE_DIR, "scripts/setup_config.py")
-        try:
-            subprocess.run([python_exe, setup_script, env_arg], check=True)
-            print("✅ setup_config.py completed.")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Error during execution of setup_config.py: {e}")
-            sys.exit(1)
-
     region = os.getenv('AWS_REGION', 'ap-northeast-1').strip("'\" ")
     account_id = os.getenv('AWS_ACCOUNT_ID', '').strip("'\" ")
     bucket_name = os.getenv('S3_BUCKET_NAME', '').strip("'\" ")
+    s3_files_system_id = os.getenv('S3_FILES_SYSTEM_ID', '').strip("'\" ")
     table_name = os.getenv('DYNAMODB_TABLE_NAME', '').strip("'\" ")
     instance_id = os.getenv('INSTANCE_ID', '').strip("'\" ")
 
@@ -95,30 +84,52 @@ def main():
         print("\nPlease fix these in your .env file before proceeding.")
         sys.exit(1)
 
+    def with_suffix(base_name, suffix_value):
+        """Suffix重複を避けて名前を組み立てる。"""
+        if not suffix_value:
+            return base_name
+        return base_name if base_name.endswith(suffix_value) else f"{base_name}{suffix_value}"
+
     # IAMロール名の決定
     role_mapping = {
-        'executor': f"{os.getenv('EXECUTOR_ROLE_NAME', 'FactorioExecutorRole')}{suffix}",
-        'worker': f"{os.getenv('WORKER_ROLE_NAME', 'FactorioWorkerRole')}{suffix}",
-        'notifier': f"{os.getenv('NOTIFIER_ROLE_NAME', 'FactorioNotifierRole')}{suffix}",
-        'interactor': f"{os.getenv('INTERACTOR_ROLE_NAME', 'FactorioInteractorRole')}{suffix}"
+        'executor': with_suffix(os.getenv('EXECUTOR_ROLE_NAME', 'FactorioExecutorRole'), suffix),
+        'worker': with_suffix(os.getenv('WORKER_ROLE_NAME', 'FactorioWorkerRole'), suffix),
+        'notifier': with_suffix(os.getenv('NOTIFIER_ROLE_NAME', 'FactorioNotifierRole'), suffix),
+        'interactor': with_suffix(os.getenv('INTERACTOR_ROLE_NAME', 'FactorioInteractorRole'), suffix)
     }
+    ec2_server_role_name = with_suffix(os.getenv('EC2_SERVER_ROLE_NAME', 'EC2-Factorio-Server-Role'), suffix)
+    ec2_server_profile_name = with_suffix(os.getenv('EC2_SERVER_PROFILE_NAME', 'EC2-Factorio-Server-Profile'), suffix)
 
     base_eventbridge_role = os.getenv('EVENTBRIDGE_ROLE_NAME', 'FactorioEventBridgeRole')
-    eventbridge_role_name = f"{base_eventbridge_role}{suffix}"
+    eventbridge_role_name = with_suffix(base_eventbridge_role, suffix)
 
     print(f"🚀 Starting resource creation for [{env_arg.upper()}] in {region}")
     
-    # 本番環境の場合の最終確認
-    if env_arg == "prod" and os.getenv('AUTO_CONFIRM') != '1':
-        print("🚨 ATTENTION: You are about to create PRODUCTION resources.")
-        confirm = input("Proceed with production resource creation? (y/N): ")
+    # 全環境で二重確認
+    if os.getenv('AUTO_CONFIRM') != '1':
+        env_label = env_arg.upper()
+        print(f"🚨 ATTENTION: You are about to create/update [{env_label}] resources.")
+        confirm = input(f"Proceed with {env_arg} resource creation? (y/N): ")
         if confirm.lower() != 'y':
             print("🛑 Cancelled.")
             sys.exit(1)
 
-        prod_confirm = input("⚠️  FINAL CONFIRMATION: To proceed, please type 'INIT-PROD': ")
-        if prod_confirm != 'INIT-PROD':
-            print("🛑 Production resource creation aborted.")
+        required_token = f"INIT-{env_label}"
+        final_confirm = input(f"⚠️  FINAL CONFIRMATION: To proceed, please type '{required_token}': ")
+        if final_confirm != required_token:
+            print("🛑 Resource creation aborted.")
+            sys.exit(1)
+
+    # 個別実行時、または deploy_all --only init の場合は setup_config.py を事前に実行
+    if os.getenv('SETUP_CONFIG_DONE') != '1':
+        print(f"\n⚙️  Generating configuration files from templates ({env_arg})...")
+        python_exe = sys.executable
+        setup_script = os.path.join(BASE_DIR, "scripts/setup_config.py")
+        try:
+            subprocess.run([python_exe, setup_script, env_arg], check=True)
+            print("✅ setup_config.py completed.")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Error during execution of setup_config.py: {e}")
             sys.exit(1)
 
     # AWS Clients
@@ -128,6 +139,23 @@ def main():
     awslambda = boto3.client('lambda', region_name=region)
     scheduler = boto3.client('scheduler', region_name=region)
     events = boto3.client('events', region_name=region)
+    ec2_client = boto3.client('ec2', region_name=region)
+
+    def run_aws_cli(args):
+        """AWS CLIを実行し、stdoutを返す。失敗時はNone。"""
+        cmd = ["aws", *args]
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return (result.stdout or "").strip()
+        except FileNotFoundError:
+            print("⚠️  AWS CLI is not installed or not found in PATH. Skipping S3 Files auto-create.")
+            return None
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or "").strip()
+            print(f"⚠️  AWS CLI command failed: {' '.join(cmd)}")
+            if err:
+                print(f"     {err}")
+            return None
 
     def call_iam_with_retry(func, **kwargs):
         """IAMの反映遅延(AccessDenied)対策のリトライ付き呼び出し"""
@@ -143,6 +171,114 @@ def main():
                     continue
                 raise e
 
+    def ensure_s3_files_bucket_access_role(role_name):
+        """
+        S3 Files が S3 バケットと同期する際に引き受ける IAM ロール。
+        信頼ポリシーは AWS ドキュメント（S3 Files prerequisites）に準拠。
+        """
+        trust = json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "AllowS3FilesAssumeRole",
+                "Effect": "Allow",
+                "Principal": {"Service": "elasticfilesystem.amazonaws.com"},
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {"aws:SourceAccount": account_id},
+                    "ArnLike": {"aws:SourceArn": f"arn:aws:s3files:{region}:{account_id}:file-system/*"}
+                }
+            }]
+        })
+        bucket_arn = f"arn:aws:s3:::{bucket_name}"
+        object_arn = f"{bucket_arn}/*"
+        kms_arn = f"arn:aws:kms:{region}:{account_id}:*"
+        inline_policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "S3BucketPermissions",
+                    "Effect": "Allow",
+                    "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+                    "Resource": bucket_arn,
+                    "Condition": {"StringEquals": {"aws:ResourceAccount": account_id}}
+                },
+                {
+                    "Sid": "S3ObjectPermissions",
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3:AbortMultipartUpload",
+                        "s3:DeleteObject*",
+                        "s3:GetObject*",
+                        "s3:List*",
+                        "s3:PutObject*"
+                    ],
+                    "Resource": object_arn,
+                    "Condition": {"StringEquals": {"aws:ResourceAccount": account_id}}
+                },
+                {
+                    "Sid": "UseKmsKeyWithS3Files",
+                    "Effect": "Allow",
+                    "Action": [
+                        "kms:GenerateDataKey",
+                        "kms:Encrypt",
+                        "kms:Decrypt",
+                        "kms:ReEncryptFrom",
+                        "kms:ReEncryptTo"
+                    ],
+                    "Condition": {
+                        "StringLike": {
+                            "kms:ViaService": f"s3.{region}.amazonaws.com",
+                            "kms:EncryptionContext:aws:s3:arn": [bucket_arn, object_arn]
+                        }
+                    },
+                    "Resource": kms_arn
+                },
+                {
+                    "Sid": "EventBridgeManage",
+                    "Effect": "Allow",
+                    "Action": [
+                        "events:DeleteRule",
+                        "events:DisableRule",
+                        "events:EnableRule",
+                        "events:PutRule",
+                        "events:PutTargets",
+                        "events:RemoveTargets"
+                    ],
+                    "Condition": {"StringEquals": {"events:ManagedBy": "elasticfilesystem.amazonaws.com"}},
+                    "Resource": [f"arn:aws:events:{region}:{account_id}:rule/DO-NOT-DELETE-S3-Files*"]
+                },
+                {
+                    "Sid": "EventBridgeRead",
+                    "Effect": "Allow",
+                    "Action": [
+                        "events:DescribeRule",
+                        "events:ListRuleNamesByTarget",
+                        "events:ListRules",
+                        "events:ListTargetsByRule"
+                    ],
+                    "Resource": [f"arn:aws:events:{region}:{account_id}:rule/*"]
+                }
+            ]
+        }
+        try:
+            iam.get_role(RoleName=role_name)
+            print(f"    (IAM Role {role_name} for S3 Files bucket access already exists)")
+        except ClientError:
+            print(f"👤 Creating IAM role for S3 Files bucket access: {role_name}...")
+            call_iam_with_retry(
+                iam.create_role,
+                RoleName=role_name,
+                AssumeRolePolicyDocument=trust,
+                Description="Allows Amazon S3 Files to access the Factorio S3 bucket"
+            )
+        call_iam_with_retry(
+            iam.put_role_policy,
+            RoleName=role_name,
+            PolicyName="S3FilesLinkedBucketAccess",
+            PolicyDocument=json.dumps(inline_policy)
+        )
+        return f"arn:aws:iam::{account_id}:role/{role_name}"
+
     # 1. S3 Bucket
     try:
         s3.head_bucket(Bucket=bucket_name)
@@ -155,6 +291,43 @@ def main():
         s3.create_bucket(Bucket=bucket_name, **create_opts)
         s3.put_bucket_versioning(Bucket=bucket_name, VersioningConfiguration={'Status': 'Enabled'})
         print("✅ S3 Bucket created and Versioning enabled.")
+
+    # 1.5 S3 Files File System (Optional Auto-Create)
+    if s3_files_system_id:
+        print(f"    (S3 Files system already set in env: {s3_files_system_id})")
+    elif not account_id or len(account_id) != 12:
+        print("⚠️  Skip S3 Files auto-create: AWS_ACCOUNT_ID is missing or invalid.")
+    else:
+        print("🧩 S3_FILES_SYSTEM_ID is empty. Creating S3 Files service role (if needed) and file system...")
+        s3_files_role_name = with_suffix(
+            os.getenv('S3_FILES_SERVICE_ROLE_NAME', 'FactorioS3FilesServiceRole').strip("'\" "),
+            suffix
+        )
+        role_arn = ensure_s3_files_bucket_access_role(s3_files_role_name)
+        bucket_arn = f"arn:aws:s3:::{bucket_name}"
+        create_args = [
+            "s3files", "create-file-system",
+            "--bucket", bucket_arn,
+            "--role-arn", role_arn,
+            "--region", region,
+            "--accept-bucket-warning",
+            "--query", "FileSystemId",
+            "--output", "text"
+        ]
+        profile = os.getenv("AWS_PROFILE", "").strip().strip("'\" ")
+        if profile:
+            create_args.extend(["--profile", profile])
+
+        created_id = run_aws_cli(create_args)
+
+        if created_id and created_id.startswith("fs-"):
+            print(f"✅ S3 Files created: {created_id}")
+            print(f"ℹ️  Add this value to {env_file}: S3_FILES_SYSTEM_ID='{created_id}'")
+        else:
+            print("⚠️  Could not auto-create S3 Files.")
+            print("   Common causes: outdated AWS CLI, missing s3files subcommand, or IAM policy not yet allowing s3files:* / iam:PassRole for elasticfilesystem.amazonaws.com.")
+            print("   Run: python scripts/setup_config.py <env> && python scripts/deploy_policies.py <env>")
+            print("   Then retry init, or create the file system in the console and set S3_FILES_SYSTEM_ID manually.")
 
     # 2. DynamoDB Table
     try:
@@ -243,6 +416,85 @@ def main():
                 iam.attach_role_policy(RoleName=attach['role'], PolicyArn=p_arn)
         except ClientError as e:
             print(f"⚠️  Could not check/attach {attach['policy']}: {e}")
+
+    # 4.6. EC2 Server Role / Instance Profile (managed target)
+    print("🛡️  Checking IAM Role/Profile for EC2 server...")
+    ec2_trust_policy = json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "ec2.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+        }]
+    })
+
+    try:
+        iam.get_role(RoleName=ec2_server_role_name)
+        print(f"    (IAM Role {ec2_server_role_name} already exists)")
+    except ClientError:
+        print(f"  - Creating {ec2_server_role_name}...")
+        iam.create_role(RoleName=ec2_server_role_name, AssumeRolePolicyDocument=ec2_trust_policy)
+
+    ec2_policy_arns = [
+        "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+        "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
+        f"arn:aws:iam::{account_id}:policy/{os.getenv('SERVER_POLICY_NAME', 'FactorioServerPolicy')}"
+    ]
+    attached_to_ec2_role = call_iam_with_retry(iam.list_attached_role_policies, RoleName=ec2_server_role_name).get('AttachedPolicies', [])
+    attached_ec2_arns = {p['PolicyArn'] for p in attached_to_ec2_role}
+    for p_arn in ec2_policy_arns:
+        p_name = p_arn.split('/')[-1]
+        if p_arn in attached_ec2_arns:
+            print(f"    (Already attached: {p_name} to {ec2_server_role_name})")
+        else:
+            print(f"  - Attaching {p_name} to {ec2_server_role_name}...")
+            iam.attach_role_policy(RoleName=ec2_server_role_name, PolicyArn=p_arn)
+
+    try:
+        iam.get_instance_profile(InstanceProfileName=ec2_server_profile_name)
+        print(f"    (Instance Profile {ec2_server_profile_name} already exists)")
+    except ClientError:
+        print(f"  - Creating Instance Profile {ec2_server_profile_name}...")
+        iam.create_instance_profile(InstanceProfileName=ec2_server_profile_name)
+
+    profile_roles = iam.get_instance_profile(InstanceProfileName=ec2_server_profile_name)['InstanceProfile'].get('Roles', [])
+    if any(r.get('RoleName') == ec2_server_role_name for r in profile_roles):
+        print(f"    (Role {ec2_server_role_name} already in profile {ec2_server_profile_name})")
+    else:
+        print(f"  - Adding {ec2_server_role_name} to {ec2_server_profile_name}...")
+        call_iam_with_retry(
+            iam.add_role_to_instance_profile,
+            InstanceProfileName=ec2_server_profile_name,
+            RoleName=ec2_server_role_name
+        )
+
+    # TODO ID:014: 既存EC2がある前提で、instance profile まで自動適用
+    if instance_id:
+        try:
+            assocs = ec2_client.describe_iam_instance_profile_associations(
+                Filters=[{'Name': 'instance-id', 'Values': [instance_id]}]
+            ).get('IamInstanceProfileAssociations', [])
+            target_profile_arn = f"arn:aws:iam::{account_id}:instance-profile/{ec2_server_profile_name}"
+
+            if not assocs:
+                print(f"  - Associating {ec2_server_profile_name} to EC2 {instance_id}...")
+                ec2_client.associate_iam_instance_profile(
+                    InstanceId=instance_id,
+                    IamInstanceProfile={'Name': ec2_server_profile_name}
+                )
+            else:
+                current = assocs[0]
+                current_arn = current.get('IamInstanceProfile', {}).get('Arn')
+                if current_arn != target_profile_arn:
+                    print(f"  - Replacing EC2 profile on {instance_id} -> {ec2_server_profile_name}...")
+                    ec2_client.replace_iam_instance_profile_association(
+                        AssociationId=current['AssociationId'],
+                        IamInstanceProfile={'Name': ec2_server_profile_name}
+                    )
+                else:
+                    print(f"    (EC2 {instance_id} already uses {ec2_server_profile_name})")
+        except ClientError as e:
+            print(f"⚠️  Could not apply instance profile to {instance_id}: {e}")
 
     # 5. Lambda Placeholders
     def get_env_int(key, default):
@@ -468,7 +720,7 @@ if __name__ == "__main__":
             # Load profile from .env if possible
             BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
-            load_dotenv(os.path.join(BASE_DIR, f".env.{env_arg}" if env_arg != "prod" else ".env"))
+            load_dotenv(os.path.join(BASE_DIR, f".env.{env_arg}" if env_arg != "prod" else ".env"), override=True)
         
         main()
     except Exception as e:

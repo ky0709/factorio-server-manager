@@ -21,6 +21,7 @@ def get_webhook_url(key='DISCORD_WEBHOOK_URL'):
         return _url_cache[path]
 
     try:
+        # TODO ID:003: String化後の単体取得互換性を確認
         response = ssm.get_parameter(
             Name=path,
             WithDecryption=True

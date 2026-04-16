@@ -9,6 +9,7 @@
                 "s3:PutBucketVersioning",
                 "s3:GetBucketLocation",
                 "s3:ListBucket",
+                "s3:ListBucketVersions",
                 "s3:DeleteBucket"
             ],
             "Resource": [
@@ -21,7 +22,9 @@
             "Action": [
                 "dynamodb:CreateTable",
                 "dynamodb:DescribeTable",
+                "dynamodb:GetItem",
                 "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
                 "dynamodb:DeleteItem",
                 "dynamodb:DeleteTable"
             ],
@@ -94,6 +97,11 @@
                 "iam:GetRole",
                 "iam:CreateRole",
                 "iam:DeleteRole",
+                "iam:GetInstanceProfile",
+                "iam:CreateInstanceProfile",
+                "iam:DeleteInstanceProfile",
+                "iam:AddRoleToInstanceProfile",
+                "iam:RemoveRoleFromInstanceProfile",
                 "iam:GetRolePolicy",
                 "iam:ListRolePolicies",
                 "iam:ListAttachedRolePolicies",
@@ -105,6 +113,9 @@
             "Resource": [
                 "arn:aws:iam::<ACCOUNT_ID>:policy/Factorio*",
                 "arn:aws:iam::<ACCOUNT_ID>:role/Factorio*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/EC2-Factorio-*",
+                "arn:aws:iam::<ACCOUNT_ID>:instance-profile/Factorio*",
+                "arn:aws:iam::<ACCOUNT_ID>:instance-profile/EC2-Factorio-*",
                 "arn:aws:iam::<ACCOUNT_ID>:policy/Amazon_EventBridge_Invoke_Lambda_*",
                 "arn:aws:iam::<ACCOUNT_ID>:policy/Amazon-EventBridge-*",
                 "arn:aws:iam::<ACCOUNT_ID>:policy/AWSLambdaBasicExecutionRole-*"
@@ -135,11 +146,89 @@
             "Sid": "EC2ReadOnlyForTesting",
             "Effect": "Allow",
             "Action": [
-                "ec2:DescribeInstances"
+                "ec2:DescribeInstances",
+                "ec2:DescribeIamInstanceProfileAssociations",
+                "ec2:AssociateIamInstanceProfile",
+                "ec2:ReplaceIamInstanceProfileAssociation"
             ],
             "Resource": [
                 "*"
             ]
+        },
+        {
+            "Sid": "S3FilesApiForInit",
+            "Effect": "Allow",
+            "Action": "s3files:*",
+            "Resource": "*"
+        },
+        {
+            "Sid": "S3FilesInitEC2Networking",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeSubnets",
+                "ec2:DescribeNetworkInterfaces",
+                "ec2:DescribeNetworkInterfaceAttribute",
+                "ec2:CreateNetworkInterface",
+                "ec2:DeleteNetworkInterface",
+                "ec2:ModifyNetworkInterfaceAttribute",
+                "ec2:DescribeSecurityGroups",
+                "ec2:DescribeVpcs",
+                "ec2:DescribeAvailabilityZones"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "S3FilesInitBucketNotifications",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetBucketNotification",
+                "s3:PutBucketNotification"
+            ],
+            "Resource": "arn:aws:s3:::factorio-*"
+        },
+        {
+            "Sid": "S3FilesInitEventBridgeRules",
+            "Effect": "Allow",
+            "Action": [
+                "events:DeleteRule",
+                "events:PutRule",
+                "events:PutTargets",
+                "events:RemoveTargets"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "events:ManagedBy": "elasticfilesystem.amazonaws.com"
+                }
+            },
+            "Resource": [
+                "arn:aws:events:<REGION>:<ACCOUNT_ID>:rule/DO-NOT-DELETE-S3-Files*"
+            ]
+        },
+        {
+            "Sid": "S3FilesInitEventBridgeRead",
+            "Effect": "Allow",
+            "Action": [
+                "events:DescribeRule",
+                "events:ListRuleNamesByTarget",
+                "events:ListRules",
+                "events:ListTargetsByRule"
+            ],
+            "Resource": [
+                "arn:aws:events:<REGION>:<ACCOUNT_ID>:rule/*"
+            ]
+        },
+        {
+            "Sid": "IAMPassRoleS3FilesLinkedRole",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": [
+                "arn:aws:iam::<ACCOUNT_ID>:role/<S3_FILES_SERVICE_ROLE_NAME>*"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": "elasticfilesystem.amazonaws.com"
+                }
+            }
         },
         {
             "Sid": "IAMPassRole",
@@ -150,14 +239,16 @@
                 "arn:aws:iam::<ACCOUNT_ID>:role/<EXECUTOR_ROLE_NAME>*",
                 "arn:aws:iam::<ACCOUNT_ID>:role/<WORKER_ROLE_NAME>*",
                 "arn:aws:iam::<ACCOUNT_ID>:role/<NOTIFIER_ROLE_NAME>*",
-                "arn:aws:iam::<ACCOUNT_ID>:role/<EVENTBRIDGE_ROLE_NAME>*"
+                "arn:aws:iam::<ACCOUNT_ID>:role/<EVENTBRIDGE_ROLE_NAME>*",
+                "arn:aws:iam::<ACCOUNT_ID>:role/<EC2_SERVER_ROLE_NAME>*"
             ],
             "Condition": {
                 "StringEquals": {
                     "iam:PassedToService": [
                         "lambda.amazonaws.com",
                         "scheduler.amazonaws.com",
-                        "events.amazonaws.com"
+                        "events.amazonaws.com",
+                        "ec2.amazonaws.com"
                     ]
                 }
             }

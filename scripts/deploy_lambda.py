@@ -97,9 +97,9 @@ def deploy_lambda_functions():
     
     if os.path.exists(env_path):
         print(f"📖 Loading environment: {env_file}")
-        load_dotenv(env_path)
+        load_dotenv(env_path, override=True)
     else:
-        load_dotenv(os.path.join(BASE_DIR, ".env"))
+        load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
     aws_region = os.getenv('AWS_REGION', 'ap-northeast-1')
     lambda_client = boto3.client('lambda', region_name=aws_region)
@@ -236,8 +236,9 @@ def deploy_lambda_functions():
 if __name__ == "__main__":
     # スクリプトの場所を基準にプロジェクトルートを取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # 認証チェックの前に .env を読み込む
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
+    env_file = ".env" if env_arg == "prod" else f".env.{env_arg}"
+    load_dotenv(os.path.join(BASE_DIR, env_file), override=True)
 
     # 実行前に boto3 の認証情報があるか確認するメッセージ
     if not boto3.Session().get_credentials():

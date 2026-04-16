@@ -186,7 +186,19 @@ def handle_restore(event):
                 print(f"Failed to update catalog after restore: {db_err}")
 
             return get_msg("restore", "complete", locale, date=v_date, id=vid), None
-        except Exception as e: return get_msg("restore", "failed", locale, err=str(e)), None
+        except Exception as e:
+            # TODO ID:030: restore select の詳細失敗情報はログチャットへ分離し、メインチャットは要約のみ返す
+            err_text = str(e)
+            notify(
+                f"⚠️ [LOG] Restore select failed. key={key} version_id={vid} error={err_text}",
+                mode='log'
+            )
+            # TODO ID:031: メインチャット向けエラー要約を locale に応じて日本語/英語で返す
+            if "AccessDenied" in err_text or "GetObjectVersion" in err_text:
+                safe_err = "復元処理に必要な権限が不足しています。管理者にログチャットの確認と権限設定の見直しを依頼してください。"
+            else:
+                safe_err = "復元処理に失敗しました。管理者にログチャットの確認を依頼してください。"
+            return get_msg("restore", "failed", locale, err=safe_err), None
 
 def handle_auto_check(event):
     test_mode = event.get('test_mode', False)
@@ -194,6 +206,7 @@ def handle_auto_check(event):
     locale = event.get('locale', 'ja')
     
     ec2 = get_client('ec2')
+    # TODO ID:006: DYNAMIC対応時は監視対象InstanceIdを固定値ではなくセッションの稼働中インスタンスIDから解決する
     inst = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
     state_name = inst['State']['Name']
     if state_name != 'running' and not test_mode: return
@@ -276,6 +289,8 @@ def handle_auto_check(event):
         p_count = int(match.group(1)) if match else 1
         if p_count == 0:
             # 無人カウントの擬似化
+            # TODO ID:002: 無人判定をMIN_IDLE_MINUTESへ移行
+            # 監視間隔の都合上、指定時間より待機が長くなる（後ろ倒しになる）可能性はあるが、稼働安定性は向上する。
             z_count = mock.get('zero_player_count', factorio_state_table.get_item(Key={'ConfigKey': 'ZeroPlayerCount'}).get('Item', {}).get('CountValue', 0)) + 1
             threshold = int(config.get('zero_player_threshold', 3))
             if z_count >= threshold:
