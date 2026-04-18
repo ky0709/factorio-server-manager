@@ -1,4 +1,22 @@
 プロジェクト管理表
+
+## 直近状態（2026-04-19 更新）
+
+- **ブランチ**: `develop` に変更反映済み（`origin/develop` と同期）。**回帰確認**（下記チェックリスト相当）後、問題なければ `develop` → `master` の PR で安定版へマージする想定。
+- **Issue #6**（SSM String 化 / KMS コスト）: **`ID:001` は完了 `[x]`**。GitHub 上は **#6 はクローズ済み**。
+- **着手前**: `docs/roadmap.md` の Step 順（利用者向け 👤 節含む）と、本条「**ステップ横断の考慮事項**」を読む。
+- **次の候補（ブランチは ID ごとに分離。039/006 と 038/033 を同一ブランチに混ぜない）**:
+  - **ID:039** Executor モジュール分割（同一 Lambda）→ **ID:006** ハイブリッド → 検証後 **ID:040**
+  - 並行候補: **ID:038** Discord 枠組み先行 / **ID:033** 以降 Step 3 S3 統合（ロードマップ現行フェーズと整合）
+
+### 回帰確認チェックリスト（`develop`）
+
+[ ] 対象環境の `.env.<env>` が意図どおり（`check_env_leaks` 等で漏れがないこと）
+[ ] `test_runner`（必要なら **ID:028** 相当の部分実行オプション利用）で主要疎通が通ること
+[ ] Discord / Lambda ルーティングが環境サフィックス（例: `*-dev`）で誤フォールバックしていないこと
+
+---
+
 [x] ID:001 [FIX] [OPS] 非機密SSMをString保存へ変更
     ・関連箇所: scripts/register.py
     ・Issue: #6 (https://github.com/ky0709/factorio-server-manager/issues/6)
