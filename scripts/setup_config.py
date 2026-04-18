@@ -1,0 +1,113 @@
+import os
+import sys
+from dotenv import load_dotenv
+
+def setup_configs():
+    # スクリプトの場所を基準にプロジェクトルートを取得
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # 環境選択 (例: python setup_config.py dev)
+    env_arg = sys.argv[1] if len(sys.argv) > 1 else "prod"
+    env_file = ".env" if env_arg == "prod" else f".env.{env_arg}"
+    env_path = os.path.join(BASE_DIR, env_file)
+    
+    if os.path.exists(env_path):
+        print(f"📖 Loading environment: {env_file}")
+        load_dotenv(env_path, override=True)
+    else:
+        print(f"⚠️  Environment file {env_file} not found, falling back to default .env")
+        load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
+
+    # 環境変数名とプレースホルダーの対応定義
+    env_mapping = {
+        'AWS_REGION': "<REGION>",
+        'AWS_ACCOUNT_ID': "<ACCOUNT_ID>",
+        'SSM_PARAMETER_PATH': "<SSM_PARAMETER_PATH>",
+        'DYNAMODB_TABLE_NAME': "<DYNAMODB_TABLE_NAME>",
+        'INSTANCE_ID': "<INSTANCE_ID>",
+        'S3_BUCKET_NAME': "<S3_BUCKET_NAME>",
+        'SAVE_FILE_KEY': "<SAVE_FILE_KEY>",
+        'EXECUTOR_LAMBDA_NAME': "<EXECUTOR_LAMBDA_NAME>",
+        'WORKER_LAMBDA_NAME': "<WORKER_LAMBDA_NAME>",
+        'NOTIFIER_LAMBDA_NAME': "<NOTIFIER_LAMBDA_NAME>",
+        'INTERACTOR_LAMBDA_NAME': "<INTERACTOR_LAMBDA_NAME>",
+        'INTERACTOR_ROLE_NAME': "<INTERACTOR_ROLE_NAME>",
+        'EXECUTOR_ROLE_NAME': "<EXECUTOR_ROLE_NAME>",
+        'WORKER_ROLE_NAME': "<WORKER_ROLE_NAME>",
+        'NOTIFIER_ROLE_NAME': "<NOTIFIER_ROLE_NAME>",
+        'EVENTBRIDGE_ROLE_NAME': "<EVENTBRIDGE_ROLE_NAME>",
+        'EC2_SERVER_ROLE_NAME': "<EC2_SERVER_ROLE_NAME>",
+        'EC2_SERVER_PROFILE_NAME': "<EC2_SERVER_PROFILE_NAME>",
+        'S3_FILES_SERVICE_ROLE_NAME': "<S3_FILES_SERVICE_ROLE_NAME>",
+        'INTERACT_POLICY_NAME': "<INTERACT_POLICY_NAME>",
+        'EXECUTE_POLICY_NAME': "<EXECUTE_POLICY_NAME>",
+        'NOTIFY_POLICY_NAME': "<NOTIFY_POLICY_NAME>",
+        'SERVER_POLICY_NAME': "<SERVER_POLICY_NAME>",
+        'REGIST_POLICY_NAME': "<REGIST_POLICY_NAME>",
+        'WORK_POLICY_NAME': "<WORK_POLICY_NAME>",
+        'EVENTBRIDGE_POLICY_NAME': "<EVENTBRIDGE_POLICY_NAME>",
+    }
+
+    replacements = {}
+    missing_vars = []
+
+    default_values = {
+        'INTERACTOR_LAMBDA_NAME': 'Factorio_Interactor',
+        'EC2_SERVER_ROLE_NAME': 'EC2-Factorio-Server-Role',
+        'EC2_SERVER_PROFILE_NAME': 'EC2-Factorio-Server-Profile',
+        'S3_FILES_SERVICE_ROLE_NAME': 'FactorioS3FilesServiceRole',
+    }
+
+    for env_key, placeholder in env_mapping.items():
+        default = default_values.get(env_key)
+        val = os.getenv(env_key, default)
+
+        if val is None:
+            missing_vars.append(env_key)
+        else:
+            replacements[placeholder] = val.strip()
+
+    if missing_vars:
+        print("❌ Error: The following environment variables are missing in .env:")
+        for var in missing_vars:
+            print(f"   - {var}")
+        print("\nAborting setup. Please define these variables in your .env file.")
+        sys.exit(1)
+
+    # テンプレートファイルと出力先の対応
+    targets = [
+        os.path.join(BASE_DIR, "aws/IAM/FactorioInteractPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioExecutePolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioNotifyPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioServerPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioRegistPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioWorkPolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioEventBridgePolicy/policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioLambdaRole/trust_policy.json"),
+        os.path.join(BASE_DIR, "aws/IAM/FactorioEventBridgeRole/trust_policy.json")
+    ]
+
+    print("--- Generating IAM Policies from Templates ---")
+
+    for target in targets:
+        template_path = target + ".example"
+        
+        if not os.path.exists(template_path):
+            print(f"⚠️  Template not found: {template_path}")
+            continue
+
+        with open(template_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # プレースホルダーを実際の値で置換
+        for placeholder, value in replacements.items():
+            if value:
+                content = content.replace(placeholder, value)
+        
+        # 置換後の内容を policy.json として出力
+        with open(target, 'w', encoding='utf-8') as f:
+            f.write(content)
+        print(f"✅ Generated: {target}")
+
+if __name__ == "__main__":
+    setup_configs()

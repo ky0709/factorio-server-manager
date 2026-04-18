@@ -1,0 +1,97 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowLogging",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:<REGION>:<ACCOUNT_ID>:*"
+        },
+        {
+            
+            "Sid": "AllowEC2Describe",
+            "Effect": "Allow",
+            "Action": "ec2:DescribeInstances",
+            "Resource": "*"
+        },
+                {
+            "Sid": "AllowSSMParameterAccess",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter",
+                "ssm:GetParameters",
+                "ssm:GetParametersByPath"
+            ],
+            "Resource": [
+                "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:parameter<SSM_PARAMETER_PATH>*"
+            ]
+        },
+        {
+            "Sid": "AllowKMSDecrypt",
+            "Effect": "Allow",
+            "Action": [
+                "kms:Decrypt"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "AllowSSMCommandExecution",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:SendCommand"
+            ],
+            "Resource": [
+                "arn:aws:ec2:<REGION>:<ACCOUNT_ID>:instance/<INSTANCE_ID>",
+                "arn:aws:ssm:<REGION>::document/AWS-RunShellScript"
+            ]
+        },
+        {
+            "Sid": "AllowSSMCommandList",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:ListCommandInvocations"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "AllowDynamoDBStateAccess",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:UpdateItem"
+            ],
+            "Resource": "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/<DYNAMODB_TABLE_NAME>"
+        },
+        {
+            "Sid": "AllowS3ListBucket",
+            "Effect": "Allow",
+            "Action": "s3:ListBucketVersions",
+            "Resource": "arn:aws:s3:::<S3_BUCKET_NAME>"
+        },
+        {
+            "Sid": "AllowS3ObjectAccess",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:GetObjectVersion",
+                "s3:PutObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::<S3_BUCKET_NAME>/<SAVE_FILE_KEY>"
+            ]
+        },
+        {
+            "Sid": "AllowLambdaInvoke",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": [
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<NOTIFIER_LAMBDA_NAME>",
+                "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:<EXECUTOR_LAMBDA_NAME>"
+            ]
+        }
+    ]
+}
