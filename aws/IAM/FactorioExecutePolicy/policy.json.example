@@ -69,10 +69,19 @@
             "Resource": "arn:aws:dynamodb:<REGION>:<ACCOUNT_ID>:table/<DYNAMODB_TABLE_NAME>"
         },
         {
+            "Sid": "AllowS3ListVersionsForIntegrationTests",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucketVersions"
+            ],
+            "Resource": "arn:aws:s3:::<S3_BUCKET_NAME>"
+        },
+        {
             "Sid": "AllowS3AccessForStatus",
             "Effect": "Allow",
             "Action": [
-                "s3:GetObject"
+                "s3:GetObject",
+                "s3:DeleteObjectVersion"
             ],
             "Resource": [
                 "arn:aws:s3:::<S3_BUCKET_NAME>/<SAVE_FILE_KEY>"

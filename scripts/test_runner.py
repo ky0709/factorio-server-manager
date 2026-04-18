@@ -29,14 +29,12 @@ else:
 
 lambda_client = boto3.client('lambda', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
 ec2_client = boto3.client('ec2', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
-s3_client = boto3.client('s3', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
 dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'ap-northeast-1'))
 factorio_state_table = dynamodb.Table(os.getenv('DYNAMODB_TABLE_NAME', 'FactorioState'))
-save_bucket_name = os.getenv('S3_BUCKET_NAME')
-save_file_key = os.getenv('SAVE_FILE_KEY')
 
-def invoke_lambda(function_name, payload):
-    print(f"🚀 Invoking {function_name}...")
+def invoke_lambda(function_name, payload, quiet=False):
+    if not quiet:
+        print(f"🚀 Invoking {function_name}...")
     try:
         response = lambda_client.invoke(
             FunctionName=function_name,
@@ -44,11 +42,21 @@ def invoke_lambda(function_name, payload):
             Payload=json.dumps(payload)
         )
         result = json.loads(response['Payload'].read().decode('utf-8'))
-        print(f"✅ Response from {function_name}: {json.dumps(result, indent=2, ensure_ascii=False)}")
+        if not quiet:
+            print(f"✅ Response from {function_name}: {json.dumps(result, indent=2, ensure_ascii=False)}")
         return result
     except Exception as e:
         print(f"❌ Failed to invoke {function_name}: {e}")
         return None
+
+
+def query_save_state_from_executor(quiet=False):
+    """S3 最新バージョンと LatestSaveInfo を Executor（integration_query_save_state）経由で取得する。"""
+    return invoke_lambda(
+        os.getenv('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'),
+        {"action": "integration_query_save_state", "test_mode": True},
+        quiet=quiet,
+    )
 
 def wait_for_ec2_state(instance_id, state):
     print(f"⏳ Waiting for instance {instance_id} to reach state: {state}...")
@@ -69,36 +77,14 @@ def wait_for_ec2_state(instance_id, state):
             print(f"🔕 [SILENT MODE] Suppressed Notification: 🚀 [LOG] EC2 Instance ({instance_id}) is now running.")
 
 def get_latest_save_version():
-    """S3上の現在のセーブ最新バージョンを返す。"""
-    if not save_bucket_name or not save_file_key:
-        raise ValueError("S3_BUCKET_NAME and SAVE_FILE_KEY are required for save verification.")
-    resp = s3_client.list_object_versions(Bucket=save_bucket_name, Prefix=save_file_key)
-    versions = [
-        v for v in resp.get('Versions', [])
-        if v.get('Key') == save_file_key
-    ]
-    delete_markers = [
-        m for m in resp.get('DeleteMarkers', [])
-        if m.get('Key') == save_file_key
-    ]
-    latest_entry = None
-    if versions:
-        latest_entry = versions[0]
-    if delete_markers and (not latest_entry or delete_markers[0]['LastModified'] > latest_entry['LastModified']):
-        latest_entry = delete_markers[0]
-    return latest_entry
-
-def get_latest_save_info_item():
-    return factorio_state_table.get_item(Key={'ConfigKey': 'LatestSaveInfo'}).get('Item')
-
-def can_verify_save_state():
-    """test_runner から S3/DynamoDB の save 状態を直接検証できるか確認する。"""
-    try:
-        get_latest_save_version()
-        get_latest_save_info_item()
-        return True, None
-    except Exception as e:
-        return False, str(e)
+    """Executor 経由で S3 上の現在のセーブ最新バージョン相当を返す。"""
+    res = query_save_state_from_executor(quiet=True)
+    if not res or not res.get('ok'):
+        raise ValueError(res.get('error', 'integration_query_save_state failed') if res else 'no response')
+    vid = res.get('version_id')
+    if not vid:
+        return None
+    return {'VersionId': vid, 'LastModified': res.get('last_modified')}
 
 def wait_for_new_save_version(previous_version_id, timeout_seconds=180, label="save"):
     """指定バージョンから新しい S3 バージョンが作られるまで待つ。"""
@@ -112,53 +98,25 @@ def wait_for_new_save_version(previous_version_id, timeout_seconds=180, label="s
     return None
 
 def restore_save_test_state(created_version_ids, baseline_latest_version, baseline_save_info):
-    """テストで作成した S3 バージョンとカタログ情報をテスト前状態へ戻す。"""
-    restored = True
-
-    for version_id in reversed(created_version_ids):
-        if not version_id:
-            continue
-        try:
-            s3_client.delete_object(Bucket=save_bucket_name, Key=save_file_key, VersionId=version_id)
-            print(f"🧹 Deleted test save version: {version_id}")
-        except Exception as e:
-            restored = False
-            print(f"⚠️ Failed to delete test save version {version_id}: {e}")
-
-    if baseline_save_info:
-        expr_values = {':ts': baseline_save_info['Timestamp']}
-        update_expr = "set #ts = :ts"
-        expr_names = {'#ts': 'Timestamp'}
-        if 'FileSize' in baseline_save_info:
-            update_expr += ", #sz = :sz"
-            expr_names['#sz'] = 'FileSize'
-            expr_values[':sz'] = baseline_save_info['FileSize']
-        try:
-            factorio_state_table.update_item(
-                Key={'ConfigKey': 'LatestSaveInfo'},
-                UpdateExpression=update_expr,
-                ExpressionAttributeNames=expr_names,
-                ExpressionAttributeValues=expr_values
-            )
-            print("🧹 Restored LatestSaveInfo to baseline.")
-        except Exception as e:
-            restored = False
-            print(f"⚠️ Failed to restore LatestSaveInfo: {e}")
-    else:
-        try:
-            factorio_state_table.delete_item(Key={'ConfigKey': 'LatestSaveInfo'})
-            print("🧹 Removed LatestSaveInfo to match baseline absence.")
-        except Exception as e:
-            restored = False
-            print(f"⚠️ Failed to delete LatestSaveInfo: {e}")
-
-    if baseline_latest_version:
-        current_latest = get_latest_save_version()
-        if not current_latest or current_latest.get('VersionId') != baseline_latest_version.get('VersionId'):
-            restored = False
-            print("⚠️ Latest S3 save version did not return to baseline.")
-
-    return restored
+    """テストで作成した S3 バージョンとカタログ情報をテスト前状態へ戻す（Executor Lambda 経由。Regist に削除権限を要しない）。"""
+    payload = {
+        "action": "integration_restore_save_state",
+        "test_mode": True,
+        "data": {
+            "delete_version_ids": created_version_ids,
+            "baseline_version_id": baseline_latest_version.get('VersionId') if baseline_latest_version else None,
+            "baseline_save_info": baseline_save_info,
+        },
+    }
+    res = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'), payload)
+    if not res:
+        print("⚠️ integration_restore_save_state: no response")
+        return False
+    if res.get('ok'):
+        return True
+    err = res.get('errors') or res.get('error')
+    print(f"⚠️ integration_restore_save_state failed: {err}")
+    return False
 
 def run_flow_test():
     print("=== Factorio Server Manager Integration Test Flow ===\n")
@@ -169,11 +127,13 @@ def run_flow_test():
     baseline_save_info = None
     save_state_verification_enabled = False
 
-    save_state_verification_enabled, verify_skip_reason = can_verify_save_state()
-    if save_state_verification_enabled:
-        baseline_latest_version = get_latest_save_version()
-        baseline_save_info = get_latest_save_info_item()
+    snap = query_save_state_from_executor()
+    if snap and snap.get('ok'):
+        save_state_verification_enabled = True
+        baseline_latest_version = {'VersionId': snap['version_id']} if snap.get('version_id') else None
+        baseline_save_info = snap.get('save_info')
     else:
+        verify_skip_reason = (snap.get('error') if snap else None) or 'integration_query_save_state failed'
         print(f"⚠️ Save state verification skipped: {verify_skip_reason}")
 
     # サイレントモード時はグローバルなテストフラグをDBにセット
@@ -275,7 +235,6 @@ def run_flow_test():
 
         # 5. Executor 単体テスト (Save確認)
         print("\n[Test 5] Executor Save Check")
-        # TODO ID:027: save/stop のS3反映確認と巻き戻しは Lambda 側完結へ移行する
         save_payload = {"action": "save"}
         save_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), save_payload)
         if save_result and (save_result.get('content') or save_result.get('status') == 'ok'):

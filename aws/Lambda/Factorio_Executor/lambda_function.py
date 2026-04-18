@@ -5,6 +5,7 @@ import time
 import secrets
 import string
 from datetime import datetime
+from decimal import Decimal
 
 # レイヤーからのインポート
 from factorio_common.utils import JST, get_client, fetch_config_from_ssm, run_rcon_command, format_msg, notify_via_lambda
@@ -17,6 +18,122 @@ COLOR_GREEN, COLOR_BLUE = 0x2ECC71, 0x3498DB
 config = {"initialized": False}
 factorio_state_table = None
 _suppressed_logs = []
+
+def _dynamo_to_json_safe(val):
+    """integration テスト応答を JSON 直列化可能にする。"""
+    if isinstance(val, Decimal):
+        return str(val)
+    if isinstance(val, dict):
+        return {k: _dynamo_to_json_safe(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_dynamo_to_json_safe(v) for v in val]
+    return val
+
+
+def get_s3_latest_save_entry():
+    """S3 バージョニング有効バケットにおける save キーの最新エントリ（Version または DeleteMarker）。"""
+    s3 = get_client('s3')
+    bucket = config.get('s3_bucket_name')
+    key = config.get('save_file_key')
+    if not bucket or not key:
+        return None
+    resp = s3.list_object_versions(Bucket=bucket, Prefix=key)
+    versions = [v for v in resp.get('Versions', []) if v.get('Key') == key]
+    delete_markers = [m for m in resp.get('DeleteMarkers', []) if m.get('Key') == key]
+    latest_entry = None
+    if versions:
+        latest_entry = versions[0]
+    if delete_markers and (not latest_entry or delete_markers[0]['LastModified'] > latest_entry['LastModified']):
+        latest_entry = delete_markers[0]
+    return latest_entry
+
+
+def handle_integration_query_save_state(event):
+    """scripts/test_runner 用: S3 最新バージョンと LatestSaveInfo を返す（Regist 権限不要）。"""
+    try:
+        latest = get_s3_latest_save_entry()
+        item = None
+        try:
+            res = factorio_state_table.get_item(Key={'ConfigKey': 'LatestSaveInfo'})
+            raw = res.get('Item')
+            if raw:
+                item = _dynamo_to_json_safe(raw)
+        except Exception as e:
+            print(f"⚠️ LatestSaveInfo get failed: {e}")
+        lm = latest.get('LastModified') if latest else None
+        return {
+            "ok": True,
+            "version_id": latest.get('VersionId') if latest else None,
+            "last_modified": lm.isoformat() if lm else None,
+            "save_info": item,
+        }
+    except Exception as e:
+        print(f"❌ integration_query_save_state: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+def handle_integration_restore_save_state(event):
+    """scripts/test_runner 用: テストで増えた S3 バージョン削除と LatestSaveInfo の巻き戻し。"""
+    data = event.get('data') or {}
+    delete_ids = data.get('delete_version_ids') or []
+    baseline_vid = data.get('baseline_version_id')
+    baseline_save_info = data.get('baseline_save_info')
+    restored = True
+    errors = []
+    s3 = get_client('s3')
+    bucket = config.get('s3_bucket_name')
+    key = config.get('save_file_key')
+    if not bucket or not key:
+        return {"ok": False, "error": "s3_bucket_name or save_file_key missing", "errors": []}
+
+    for vid in reversed(delete_ids):
+        if not vid:
+            continue
+        try:
+            s3.delete_object(Bucket=bucket, Key=key, VersionId=vid)
+            print(f"🧹 Deleted test save version: {vid}")
+        except Exception as e:
+            restored = False
+            errors.append(str(e))
+            print(f"⚠️ Failed to delete test save version {vid}: {e}")
+
+    if baseline_save_info:
+        expr_values = {':ts': baseline_save_info['Timestamp']}
+        update_expr = "set #ts = :ts"
+        expr_names = {'#ts': 'Timestamp'}
+        if 'FileSize' in baseline_save_info:
+            update_expr += ", #sz = :sz"
+            expr_names['#sz'] = 'FileSize'
+            expr_values[':sz'] = baseline_save_info['FileSize']
+        try:
+            factorio_state_table.update_item(
+                Key={'ConfigKey': 'LatestSaveInfo'},
+                UpdateExpression=update_expr,
+                ExpressionAttributeNames=expr_names,
+                ExpressionAttributeValues=expr_values
+            )
+            print("🧹 Restored LatestSaveInfo to baseline.")
+        except Exception as e:
+            restored = False
+            errors.append(str(e))
+            print(f"⚠️ Failed to restore LatestSaveInfo: {e}")
+    else:
+        try:
+            factorio_state_table.delete_item(Key={'ConfigKey': 'LatestSaveInfo'})
+            print("🧹 Removed LatestSaveInfo to match baseline absence.")
+        except Exception as e:
+            restored = False
+            errors.append(str(e))
+            print(f"⚠️ Failed to delete LatestSaveInfo: {e}")
+
+    if baseline_vid:
+        current = get_s3_latest_save_entry()
+        if not current or current.get('VersionId') != baseline_vid:
+            restored = False
+            print("⚠️ Latest S3 save version did not return to baseline.")
+
+    return {"ok": restored, "errors": errors}
+
 
 def update_latest_save_info(timestamp_iso):
     """最新セーブの時刻とサイズをカタログへ保存する。"""
@@ -297,7 +414,6 @@ def handle_start(event, ec2, inst, state, ip, locale):
 
 def handle_stop(event, ec2, inst, state, ip, locale):
         # TODO ID:006: SERVER_RUN_MODE=STATICはstop_instances、DYNAMICはterminate_instancesへ分岐し、終了対象InstanceIdをセッション情報から解決する
-        # TODO ID:027: save/stop の S3 反映確認と巻き戻しは test_runner 直アクセスではなく Lambda 側完結で実装する
         if state == 'running':
             start_stop_time = time.time()
 
@@ -358,7 +474,6 @@ def handle_stop(event, ec2, inst, state, ip, locale):
 
 def handle_save(event, ec2, inst, state, ip, locale):
         if state != 'running': return get_msg("common", "server_offline", locale)
-        # TODO ID:027: save 完了判定で新規 S3 version 作成確認を Lambda 側で返せるようにする
         # テストモード以外の場合のみ、実際のセーブ処理を実行
         if not config.get("test_mode"):
             run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
@@ -450,6 +565,16 @@ def lambda_handler(event, context):
     action = event.get('action')
     test_mode = event.get('test_mode', False)
     config["test_mode"] = test_mode
+
+    # scripts/test_runner 用: S3 状態の参照・巻き戻し（Executor ロールで実行。Regist に S3 削除権限を広げない）
+    if action in ('integration_query_save_state', 'integration_restore_save_state'):
+        if not test_mode:
+            return {"ok": False, "error": "test_mode is required"}
+        if not factorio_state_table:
+            return {"ok": False, "error": "DynamoDB not initialized"}
+        if action == 'integration_query_save_state':
+            return handle_integration_query_save_state(event)
+        return handle_integration_restore_save_state(event)
 
     # EventBridge からの EC2 状態変更通知の処理
     if event.get('source') == 'aws.ec2' and event.get('detail-type') == 'EC2 Instance State-change Notification':

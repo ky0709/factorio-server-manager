@@ -5,13 +5,14 @@
 - **ブランチ**: `develop` に変更反映済み（`origin/develop` と同期）。**回帰確認**（下記チェックリスト相当）後、問題なければ `develop` → `master` の PR で安定版へマージする想定。
 - **Issue #6**（SSM String 化 / KMS コスト）: **`ID:001` は完了 `[x]`**。GitHub 上は **#6 はクローズ済み**。
 - **着手前**: `docs/roadmap.md` の Step 順（利用者向け 👤 節含む）と、本条「**ステップ横断の考慮事項**」を読む。
+- **機密スキャン（運用）**: `check_env_leaks` は**現在の** `.env` の値だけを履歴検索する。シークレットを**ローテーションした直後**は、**変更前の値**でもう一度履歴を走らせる（`git grep` 等）か、旧値が履歴に無いことを別途確認する（ツール拡張は後回しで可）。
 - **次の候補（ブランチは ID ごとに分離。039/006 と 038/033 を同一ブランチに混ぜない）**:
   - **ID:039** Executor モジュール分割（同一 Lambda）→ **ID:006** ハイブリッド → 検証後 **ID:040**
   - 並行候補: **ID:038** Discord 枠組み先行 / **ID:033** 以降 Step 3 S3 統合（ロードマップ現行フェーズと整合）
 
 ### 回帰確認チェックリスト（`develop`）
 
-[ ] 対象環境の `.env.<env>` が意図どおり（`check_env_leaks` 等で漏れがないこと）
+[x] 対象環境の `.env.<env>` が意図どおり（`check_env_leaks` 等で漏れがないこと）
 [ ] `test_runner`（必要なら **ID:028** 相当の部分実行オプション利用）で主要疎通が通ること
 [ ] Discord / Lambda ルーティングが環境サフィックス（例: `*-dev`）で誤フォールバックしていないこと
 
@@ -148,7 +149,7 @@
     ・背景: 現行の統合テストは `/save` と `/stop` の応答文のみを確認しており、S3 へ実セーブが反映されたか、またテスト後に `LatestSaveInfo` とセーブオブジェクトが元状態へ戻るかを検証できていないうえ、Regist 権限に `s3:ListBucketVersions` と DynamoDB の `GetItem` / `UpdateItem` がなくベースライン取得・復元で失敗するため。
     ・完了条件: test_runner が開発環境構築フェーズでも安定実行でき、S3/DynamoDB 直接検証が不可な場合はスキップ理由を明示して主要疎通テストを継続できること。
 
-[ ] ID:027 [TASK] [LOGIC] save/stop の S3 反映確認と巻き戻しを Lambda 側完結へ移行
+[x] ID:027 [TASK] [LOGIC] save/stop の S3 反映確認と巻き戻しを Lambda 側完結へ移行
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Worker/lambda_function.py, scripts/test_runner.py, aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioWorkPolicy/policy.json.example
     ・背景: test_runner から S3/DynamoDB へ直接アクセスさせると Regist 権限が肥大化し、開発用ユーザーの責務分離が崩れるため、検証と巻き戻しは実行責務を持つ Lambda 側へ寄せる必要があるため。
     ・完了条件: test_runner は Lambda 呼び出しの結果判定に専念し、S3 バージョン確認・後始末は Lambda 内処理で完結すること。
