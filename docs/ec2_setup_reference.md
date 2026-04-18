@@ -146,7 +146,7 @@ sudo -u factorio bash <<'EOF'
 cd /opt/factorio
 wget -O factorio_headless.tar.xz https://factorio.com/get-download/stable/headless/linux64
 tar -xJf factorio_headless.tar.xz --strip-components=1
-mkdir -p saves config mods
+mkdir -p saves config mods logs
 EOF
 ```
 
@@ -201,7 +201,8 @@ Wants=network-online.target
 User=factorio
 Group=factorio
 EnvironmentFile=/etc/factorio.env
-WorkingDirectory=/opt/factorio
+# Headless はログをカレントディレクトリに factorio-current.log / factorio-previous.log として出力するため、作業ディレクトリを logs に固定する
+WorkingDirectory=/opt/factorio/logs
 ExecStart=/opt/factorio/bin/x64/factorio \
   --server-settings /opt/factorio/config/server-settings.json \
   --start-server /mnt/factorio-saves/saves/save.zip \
@@ -222,8 +223,8 @@ sudo systemctl status factorio --no-pager
 補足（本番/開発を分ける場合）:
 
 - `server-settings-prod.json` / `server-settings-dev.json` と、`/etc/factorio.prod.env` / `/etc/factorio.dev.env` を作成します。
-- `factorio-prod.service` / `factorio-dev.service` を分離して、用途に応じて片方だけ起動します（同時起動は非推奨）。
-- **重要**: save の実体はローカルの `/opt/factorio/saves/*.zip` ではなく、**S3 Files 側の `/mnt/factorio-saves/saves/save.zip`** を `--start-server` に指定してください。`SAVE_FILE_KEY` も `.env` / `.env.dev` で **`saves/save.zip`** に揃えます。
+- `factorio-prod.service` / `factorio-dev.service` を分離して、用途に応じて片方だけ起動します（同時起動は非推奨）。AMI を起動オプションで切り替える運用では、**どちらのユニットも** `WorkingDirectory=/opt/factorio/logs` を揃え、`/opt/factorio/logs` を事前に作成しておくとログの場所が環境間で一致します。
+- **重要**: save の実体はローカルの `/opt/factorio/saves/*.zip` ではなく、**S3 Files 側の `/mnt/factorio-saves/saves/save.zip`** を `--start-server` に指定してください。`SAVE_FILE_KEY` も `.env` / `.env.dev` で **`saves/save.zip`** に揃えます。（`factorio-prod.service` の `--start-server` がローカル `init.zip` のままの場合は、本番運用に合わせて上記パスへ揃えること。）
 - 開発/本番で S3 バケットを分ける設計であれば、サービス側の save パスは同じ `saves/save.zip` でも問題ありません。向き先バケットは、EC2 が `/etc/fstab` でどの `S3_FILES_SYSTEM_ID` をマウントしているかで切り替わります。
 
 ### 5-5. RCON ポート疎通確認

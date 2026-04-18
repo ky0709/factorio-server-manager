@@ -182,7 +182,8 @@
 [ ] ID:033 [FEAT] [OPS] mods/config/logs の S3 ディレクトリ統合を実装
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, docs/ec2_setup_reference.md, .env.example
     ・背景: 現在は `saves/save.zip` の運用は確立している一方、`/mods` `/config` `/logs` は S3 統合が未完了で、完全ステートレス運用が成立していないため。
-    ・完了条件: `mods/config/logs` を S3 側へ統合する手順と実装が整備され、再起動後も同一データを継続利用できること。
+    ・設計方針（着手時・バケットキー）: 本番と開発で **S3 バケットを分ける**（バケット名は `.env` の `S3_BUCKET_NAME`、公開ドキュメントではプレースホルダ）。バケット内のオブジェクトキーは **ルート直下**に `saves/`（既存の `SAVE_FILE_KEY=saves/save.zip` と整合）, `logs/`, `mods/`, `config/` を置く。EC2 上は S3 Files マウント等で上記がゲームデータパスと一致するようリンク・同期方針を決める（詳細は **ID:034** で起動時自動化を強化）。
+    ・完了条件: 上記キー構成に沿って `mods` `config` `logs` が S3 側の正となり、手順・実装・環境変数が追跡可能であること。再起動・インスタンス再作成後も同一データを継続利用できること。
 
 [ ] ID:034 [FEAT] [OPS] EC2 起動時の S3 マウント/リンク自動化を強化
     ・関連箇所: docs/ec2_setup_reference.md, scripts/init_aws_resources.py, aws/Lambda/Factorio_Executor/lambda_function.py
