@@ -253,7 +253,7 @@ def run_flow_test():
                     print("  ⚠️ Save command executed but S3 new-version verification did not pass.")
             else:
                 save_ok = True
-                print("  ⚠️ S3 save verification skipped (insufficient direct access permissions).")
+                print("  ⚠️ S3 save version verification skipped (integration_query_save_state unavailable or failed at start).")
             test_results.append({"name": "Executor Save", "ok": save_ok})
             print("  ✅ Save command check passed.")
         else:
@@ -285,7 +285,7 @@ def run_flow_test():
                         print("  ⚠️ Stop command executed but S3 new-version verification did not pass.")
                 else:
                     stop_save_ok = True
-                    print("  ⚠️ S3 stop-save verification skipped (insufficient direct access permissions).")
+                    print("  ⚠️ S3 stop-save version verification skipped (integration_query_save_state unavailable or failed at start).")
                 test_results.append({"name": "Executor Stop (S3 Save)", "ok": stop_save_ok})
             except Exception as e:
                 print(f"❌ Stop wait failed: {e}")
