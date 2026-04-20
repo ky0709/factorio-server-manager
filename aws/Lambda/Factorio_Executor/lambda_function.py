@@ -158,6 +158,50 @@ def update_latest_save_info(timestamp_iso):
         ExpressionAttributeValues=expr_values
     )
 
+
+def _infer_env_label():
+    """SSM_PARAMETER_PATH から dev/prod を推定する。"""
+    path = (os.getenv('SSM_PARAMETER_PATH') or '/factorio/').strip().lower()
+    if 'dev' in path:
+        return 'dev'
+    return 'prod'
+
+
+def _run_ssm_shell_and_wait(ssm, instance_id, commands, timeout_seconds=180):
+    """
+    SSM RunShellScript を実行し、完了まで待機する。
+    戻り値: (ok: bool, status: str, stdout: str, stderr: str)
+    """
+    try:
+        sent = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={'commands': commands},
+            TimeoutSeconds=timeout_seconds
+        )
+        command_id = sent['Command']['CommandId']
+    except Exception as e:
+        return False, "SendCommandFailed", "", str(e)
+
+    deadline = time.time() + timeout_seconds + 30
+    while time.time() < deadline:
+        try:
+            inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+            status = inv.get('Status', 'Unknown')
+            if status in ('Success', 'Failed', 'TimedOut', 'Cancelled'):
+                return (
+                    status == 'Success',
+                    status,
+                    (inv.get('StandardOutputContent') or '').strip(),
+                    (inv.get('StandardErrorContent') or '').strip()
+                )
+        except Exception:
+            # Invocation がまだ反映されていない瞬間は再試行
+            pass
+        time.sleep(3)
+
+    return False, "WaitTimeout", "", f"SSM command did not finish within {timeout_seconds + 30}s"
+
 def init_config():
     try:
         global _suppressed_logs
@@ -438,27 +482,69 @@ def handle_stop(event, ec2, inst, state, ip, locale):
             else:
                 print("DEBUG: [Test Mode] Skipping RCON save and catalog update in stop sequence.")
 
-            # 2. Factorioサーバー停止 & アンマウント準備 (SSM)
+            # 2. Factorioサーバー停止 (SSM)
             ssm = get_client('ssm')
-            ssm.send_command(
-                InstanceIds=[config['instance_id']],
-                DocumentName="AWS-RunShellScript",
-                Parameters={'commands': ["sudo systemctl stop factorio"]}
+            stop_ok, stop_status, stop_out, stop_err = _run_ssm_shell_and_wait(
+                ssm,
+                config['instance_id'],
+                ["sudo systemctl stop factorio-dev || sudo systemctl stop factorio-prod || sudo systemctl stop factorio"],
+                timeout_seconds=180
             )
+            if not stop_ok:
+                notify(f"⚠️ [LOG] Failed to stop Factorio service before EC2 stop. status={stop_status} stderr={stop_err}", mode='log')
+                return (
+                    "⚠️ 停止前のFactorioサービス停止に失敗しました。EC2停止を中断しました。ログを確認してください。"
+                    if locale == 'ja'
+                    else "⚠️ Failed to stop Factorio service before shutdown. EC2 stop was aborted. Check logs."
+                )
 
-            # 3. アンマウント実行 (SSM)
+            # 3. logs を S3 へ同期 (SSM)
+            if not config.get("test_mode"):
+                env_label = _infer_env_label()
+                bucket = (config.get('s3_bucket_name') or '').strip()
+                if not bucket:
+                    notify("⚠️ [LOG] s3_bucket_name is missing. Skipping EC2 stop to avoid log loss.", mode='log')
+                    return (
+                        "⚠️ S3バケット設定が見つからないため、ログ退避漏れ防止のためEC2停止を中断しました。"
+                        if locale == 'ja'
+                        else "⚠️ S3 bucket config is missing. EC2 stop was aborted to avoid log loss."
+                    )
+
+                sync_cmd = (
+                    f"INSTANCE_ID=$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id || echo {config['instance_id']}) && "
+                    f"aws s3 sync /opt/factorio/logs/ s3://{bucket}/logs/env={env_label}/instance=${{INSTANCE_ID}}/ "
+                    "--exclude \"*\" --include \"factorio-*.log\""
+                )
+                sync_ok, sync_status, sync_out, sync_err = _run_ssm_shell_and_wait(
+                    ssm,
+                    config['instance_id'],
+                    [sync_cmd],
+                    timeout_seconds=300
+                )
+                if not sync_ok:
+                    notify(f"⚠️ [LOG] Failed to sync logs before EC2 stop. status={sync_status} stderr={sync_err}", mode='log')
+                    return (
+                        "⚠️ logs の S3 同期に失敗したため、EC2停止を中断しました。"
+                        if locale == 'ja'
+                        else "⚠️ Failed to sync logs to S3. EC2 stop was aborted."
+                    )
+            else:
+                print("DEBUG: [Test Mode] Skipping logs sync in stop sequence.")
+
+            # 4. アンマウント実行 (SSM)
             # サービス停止後、少し待ってから実行
             time.sleep(5)
-            ssm.send_command(
-                InstanceIds=[config['instance_id']],
-                DocumentName="AWS-RunShellScript",
-                Parameters={'commands': ["sudo umount /mnt/factorio-data || true"]}
+            _run_ssm_shell_and_wait(
+                ssm,
+                config['instance_id'],
+                ["sudo umount /mnt/factorio-data || true"],
+                timeout_seconds=120
             )
             
-            # 4. EC2停止
+            # 5. EC2停止
             ec2.stop_instances(InstanceIds=[config['instance_id']])
             
-            # 5. セッションパスワードのクリア
+            # 6. セッションパスワードのクリア
             try:
                 factorio_state_table.delete_item(Key={'ConfigKey': 'ActivePassword'})
                 # 停止時にもカウントをリセット
@@ -468,7 +554,7 @@ def handle_stop(event, ec2, inst, state, ip, locale):
             except Exception as e:
                 print(f"⚠️ Failed to clear active password: {e}")
 
-            # 6. メインチャットへの完了報告 (これによって Interactor のメッセージが PATCH される)
+            # 7. メインチャットへの完了報告 (これによって Interactor のメッセージが PATCH される)
             return get_msg("stop", "process_stopped", locale)
         return get_msg("stop", "already", locale)
 

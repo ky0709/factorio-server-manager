@@ -185,7 +185,7 @@
     ・設計方針（着手時・バケットキー）: 本番と開発で **S3 バケットを分ける**（バケット名は `.env` の `S3_BUCKET_NAME`、公開ドキュメントではプレースホルダ）。バケット内のオブジェクトキーは **ルート直下**に `saves/`（既存の `SAVE_FILE_KEY=saves/save.zip` と整合）, `logs/`, `mods/`, `config/` を置く。`init_aws_resources.py` はバケット作成または既存確認の直後に、上記4プレフィックスを `saves/` と同様に空キーで確保する（冪等）。運用方針として `saves/mods/config` は S3 Files 側を常時参照し、`logs` はローカル出力（`/opt/factorio/logs`）を正として停止時に S3 へ同期する。初回のローカル→マウント先コピーで `rsync -a` が `chgrp` / `mkstemp` で失敗する場合は **`docs/ec2_setup_reference.md` の 6-6-1**（`--no-group`・`--temp-dir=/tmp` 等）を参照。
     ・完了条件: 上記キー構成に沿って `saves/mods/config` が S3 側の正として運用され、`logs` は停止時同期で S3 に集約されること。手順・実装・環境変数が追跡可能で、再起動・インスタンス再作成後も同一データを継続利用できること。
 
-[ ] ID:034 [FEAT] [OPS] EC2 起動時の S3 マウント/リンク自動化を強化
+[ ] ID:034 [FEAT] [OPS] EC2 起動/停止オーケストレーション（save->logs同期->stop）を自動化
     ・関連箇所: docs/ec2_setup_reference.md, scripts/init_aws_resources.py, aws/Lambda/Factorio_Executor/lambda_function.py
     ・背景: S3 Files の手動確認・補正手順が残っており、インスタンス再作成や初回起動時の運用負荷が高いため。
     ・完了条件: 起動時に必要なマウントとリンク設定が自動で安定適用され、手動介入なしでゲーム実行パスが揃うこと。停止フローで `save` → `logs` の S3 同期 → EC2 停止の順序を強制し、AMI + 起動オプション運用でもログ退避漏れを防げること。移行完了後に未使用となる `/mnt/factorio-data/logs` の削除（または空ディレクトリ維持の明示判断）を実施し、消し忘れを防ぐこと。
