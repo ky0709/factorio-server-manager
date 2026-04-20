@@ -452,7 +452,7 @@ def handle_stop(event, ec2, inst, state, ip, locale):
             ssm.send_command(
                 InstanceIds=[config['instance_id']],
                 DocumentName="AWS-RunShellScript",
-                Parameters={'commands': ["sudo umount /mnt/factorio-saves || true"]}
+                Parameters={'commands': ["sudo umount /mnt/factorio-data || true"]}
             )
             
             # 4. EC2停止

@@ -9,6 +9,26 @@ import subprocess
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
+
+def ensure_s3_bucket_layout_prefixes(s3_client, bucket_name):
+    """
+    バケット直下に saves/ mods/ config/ logs/ のキーを置く（S3 の「フォルダ」相当）。
+    いずれかが無い場合のみ put_object する（既存バケットへの追実行でも冪等）。
+    """
+    layout_keys = ("saves/", "mods/", "config/", "logs/")
+    print(f"📁 Ensuring S3 bucket layout prefixes: {', '.join(layout_keys)}")
+    for key in layout_keys:
+        try:
+            s3_client.head_object(Bucket=bucket_name, Key=key)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("404", "NoSuchKey", "NotFound"):
+                s3_client.put_object(Bucket=bucket_name, Key=key, Body=b"")
+                print(f"    Created {key}")
+            else:
+                raise
+
+
 def main():
     # プロジェクトルートの取得
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -291,6 +311,8 @@ def main():
         s3.create_bucket(Bucket=bucket_name, **create_opts)
         s3.put_bucket_versioning(Bucket=bucket_name, VersioningConfiguration={'Status': 'Enabled'})
         print("✅ S3 Bucket created and Versioning enabled.")
+
+    ensure_s3_bucket_layout_prefixes(s3, bucket_name)
 
     # 1.5 S3 Files File System (Optional Auto-Create)
     if s3_files_system_id:

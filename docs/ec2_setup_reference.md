@@ -205,7 +205,7 @@ EnvironmentFile=/etc/factorio.env
 WorkingDirectory=/opt/factorio/logs
 ExecStart=/opt/factorio/bin/x64/factorio \
   --server-settings /opt/factorio/config/server-settings.json \
-  --start-server /mnt/factorio-saves/saves/save.zip \
+  --start-server /mnt/factorio-data/saves/save.zip \
   --rcon-port ${RCON_PORT} \
   --rcon-password ${RCON_PASSWORD}
 Restart=always
@@ -224,8 +224,9 @@ sudo systemctl status factorio --no-pager
 
 - `server-settings-prod.json` / `server-settings-dev.json` と、`/etc/factorio.prod.env` / `/etc/factorio.dev.env` を作成します。
 - `factorio-prod.service` / `factorio-dev.service` を分離して、用途に応じて片方だけ起動します（同時起動は非推奨）。AMI を起動オプションで切り替える運用では、**どちらのユニットも** `WorkingDirectory=/opt/factorio/logs` を揃え、`/opt/factorio/logs` を事前に作成しておくとログの場所が環境間で一致します。
-- **重要**: save の実体はローカルの `/opt/factorio/saves/*.zip` ではなく、**S3 Files 側の `/mnt/factorio-saves/saves/save.zip`** を `--start-server` に指定してください。`SAVE_FILE_KEY` も `.env` / `.env.dev` で **`saves/save.zip`** に揃えます。（`factorio-prod.service` の `--start-server` がローカル `init.zip` のままの場合は、本番運用に合わせて上記パスへ揃えること。）
+- **重要**: save の実体はローカルの `/opt/factorio/saves/*.zip` ではなく、**S3 Files 側の `/mnt/factorio-data/saves/save.zip`** を `--start-server` に指定してください。`SAVE_FILE_KEY` も `.env` / `.env.dev` で **`saves/save.zip`** に揃えます。（`factorio-prod.service` の `--start-server` がローカル `init.zip` のままの場合は、本番運用に合わせて上記パスへ揃えること。）
 - 開発/本番で S3 バケットを分ける設計であれば、サービス側の save パスは同じ `saves/save.zip` でも問題ありません。向き先バケットは、EC2 が `/etc/fstab` でどの `S3_FILES_SYSTEM_ID` をマウントしているかで切り替わります。
+- 推奨運用（2026-04 合意）: `saves` / `mods` / `config` は S3 Files 側を正とし、`logs` は **ローカル `/opt/factorio/logs` に出力して停止時に S3 (`logs/`) へ同期**します。`logs` を常時 S3 Files 直書きにしないことで、実行中のログ追記をローカル I/O で安定化しつつ、停止後の集計（Glue/Athena）用データは S3 に集約できます。
 
 ### 5-5. RCON ポート疎通確認
 
@@ -368,21 +369,21 @@ aws ec2 describe-vpc-attribute --vpc-id <VPC_ID> --attribute enableDnsHostnames 
 上記まで完了したうえで、EC2 上でディレクトリを用意し、`fstab` に追記します。
 
 ```bash
-sudo mkdir -p /mnt/factorio-saves
-sudo chown factorio:factorio /mnt/factorio-saves
-sudo chmod 775 /mnt/factorio-saves
+sudo mkdir -p /mnt/factorio-data
+sudo chown factorio:factorio /mnt/factorio-data
+sudo chmod 775 /mnt/factorio-data
 ```
 
 `factorio` ユーザーで `saves/` などのサブディレクトリを作れることも確認してください。
 
 ```bash
-sudo -u factorio mkdir -p /mnt/factorio-saves/saves
+sudo -u factorio mkdir -p /mnt/factorio-data/saves
 ```
 
 `/etc/fstab` 追記例（`S3_FILES_SYSTEM_ID` は `.env` の `fs-...` と一致させる）:
 
 ```plaintext
-<S3_FILES_SYSTEM_ID>:/  /mnt/factorio-saves  s3files  _netdev,rw  0  0
+<S3_FILES_SYSTEM_ID>:/  /mnt/factorio-data  s3files  _netdev,rw  0  0
 ```
 
 本番では `_netdev,nofail` の併用も検討してください（[自動マウントの注意](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-files-mounting.html)）。
@@ -392,26 +393,79 @@ sudo -u factorio mkdir -p /mnt/factorio-saves/saves
 ```bash
 sudo systemctl daemon-reload
 sudo mount -a
-mount | grep factorio-saves
-findmnt -T /mnt/factorio-saves
+mount | grep factorio-data
+findmnt -T /mnt/factorio-data
 ```
 
 初回投入の例（既存のローカル save を S3 Files 側へ移す場合）:
 
 ```bash
-sudo -u factorio cp /opt/factorio/saves/init.zip /mnt/factorio-saves/saves/save.zip
-ls -l --full-time /mnt/factorio-saves/saves/save.zip
+sudo -u factorio cp /opt/factorio/saves/init.zip /mnt/factorio-data/saves/save.zip
+ls -l --full-time /mnt/factorio-data/saves/save.zip
 ```
 
 `/save` 実行後は、EC2 側の更新時刻と S3 上の version が増えていることを確認してください。
 
 ```bash
-ls -l --full-time /mnt/factorio-saves/saves/save.zip
+ls -l --full-time /mnt/factorio-data/saves/save.zip
 ```
 
 ```bash
 aws s3api list-object-versions --bucket <S3_BUCKET_NAME> --prefix "saves/save.zip" --region <REGION> --profile <PROFILE> --output table
 ```
+
+### 6-6-1. `mods` / `config` / `logs` をマウント先へ初回同期する場合（`rsync` が失敗するとき）
+
+**よくある症状（`sudo -u factorio rsync -a ...` 時）**
+
+| メッセージ | 想定原因 |
+|------------|----------|
+| `chgrp ".../mods/." failed: Operation not permitted` | `rsync -a` はグループ（および所有者）の再現を試みる。S3 Files の NFS では **`chgrp` が許可されない**ことがある。 |
+| `mkstemp ".../mods/.mod-list.json.xxx" failed: Permission denied` | rsync は既定で**転送先ディレクトリ内**に一時ファイルを作る。S3 Files マウント上では、**隠しファイル名の作成**や **NFS の制約**で失敗することがある。 |
+| `failed to set times on ".../mods/.": Operation not permitted` | NFS 上でディレクトリの **mtime/utime の更新**が拒否されることがある。`rsync -a` は時刻の再現を試みる。 |
+| `open ".../mod-list.json": Permission denied` / `copy ".../tmp/..." -> "mod-list.json": Permission denied` | 転送先ディレクトリが **`factorio` に書き込み可能でない**（`root` 所有のまま等）。またはバケット側の **空オブジェクト `mods/`** がマウント上で **通常ファイル**として見え、ディレクトリとして使えていない。 |
+
+上記は「バケットにプレフィックスが無い」問題ではなく、**クライアント側のコピー方法と NFS の POSIX 差分**が原因であることが多い。
+
+**推奨（初回のローカル → マウント先コピー）**
+
+- グループ/所有者の再現をやめる: `--no-group --no-owner`
+- 一時ファイルをローカル（例: `/tmp`）に逃がす: `--temp-dir=/tmp`（短形: `-T /tmp`）
+- ディレクトリの時刻を触らない: `--omit-dir-times`（短形: `-O`）。**ファイル**でも `failed to set times` が出る場合は `-a` をやめ、タイムスタンプ無しで再試行する（例: `-rlDv` に上記オプションを組み合わせる）。
+
+```bash
+sudo -u factorio mkdir -p /mnt/factorio-data/mods /mnt/factorio-data/config /mnt/factorio-data/logs
+
+# 書き込み不可のときは root で所有者を揃えてから rsync（NFS では chgrp は失敗しがちだが chown は通ることが多い）
+sudo chown -R factorio:factorio /mnt/factorio-data/mods /mnt/factorio-data/config /mnt/factorio-data/logs
+
+sudo -u factorio rsync -av --no-group --no-owner --omit-dir-times --temp-dir=/tmp \
+  /opt/factorio/mods/ /mnt/factorio-data/mods/
+
+sudo -u factorio rsync -av --no-group --no-owner --omit-dir-times --temp-dir=/tmp \
+  /opt/factorio/config/ /mnt/factorio-data/config/
+```
+
+**`Permission denied` が続く場合の確認**
+
+```bash
+ls -la /mnt/factorio-data/
+ls -la /mnt/factorio-data/mods/
+```
+
+- `mods` の行が **ディレクトリ**（先頭が `d`）で、`factorio` が書き込める権限になっているか確認する。
+- 先頭が **`-`（通常ファイル）** のように見える場合、バケットに **プレフィックス用の空オブジェクト `mods/`** だけが存在し、マウント上で「フォルダ」として扱えていない可能性がある。その場合は S3 側でキー `mods/`（0 バイトのオブジェクト）を **削除**し、EC2 で `sudo -u factorio mkdir -p /mnt/factorio-data/mods` をやり直してから rsync を再実行する。
+
+`logs` は空でよい運用なら `mkdir` のみで足りることが多く、コピーは不要です。
+
+**代替（rsync を使わない）**: メタデータを極力いじらない単純コピーなら `cp -r` でもよい場合があります（大量ファイル時は `rsync` の方が再実行に強い）。
+
+```bash
+sudo -u factorio cp -r /opt/factorio/mods/. /mnt/factorio-data/mods/
+sudo -u factorio cp -r /opt/factorio/config/. /mnt/factorio-data/config/
+```
+
+その後、`mod-list.json` などがゲームユーザーで読めるか `ls -la` で確認してください。シンボリックリンクを含む場合は `rsync -av --no-group --no-owner --omit-dir-times --temp-dir=/tmp -L`（リンク先を辿る）など、内容に応じて調整します。
 
 `.env` / `.env.dev` の `SAVE_FILE_KEY` を変更した場合は、Lambda が参照する SSM へ再同期が必要です。
 
@@ -422,7 +476,7 @@ python scripts/register.py <env>
 手動で試す場合:
 
 ```bash
-sudo mount -t s3files -v <S3_FILES_SYSTEM_ID>:/ /mnt/factorio-saves
+sudo mount -t s3files -v <S3_FILES_SYSTEM_ID>:/ /mnt/factorio-data
 ```
 
 ### 6-7. トラブルシューティング（よくあるエラー）
@@ -431,8 +485,31 @@ sudo mount -t s3files -v <S3_FILES_SYSTEM_ID>:/ /mnt/factorio-saves
 |------|----------|--------------|
 | `unknown filesystem type 's3files'` | **amazon-efs-utils 未インストール** | **6-2** を実施し `mount.s3files` を確認 |
 | `Failed to resolve "...s3files....on.aws"` | **マウントターゲット未作成**、または **作成直後で `creating`**、**SG で 2049 が不通**、**VPC DNS 無効** | **6-3**〜**6-5** を確認し、`list-mount-targets` で `available` になってから再マウント |
+| `rsync`: `chgrp ... Operation not permitted`（マウント先） | **`rsync -a` が NFS 上で `chgrp` を試みる** | **`--no-group`**（必要なら **`--no-owner`**）。詳細は **6-6-1** |
+| `rsync`: `mkstemp ... Permission denied`（マウント先） | **転送先に一時ファイルを作れない** | **`--temp-dir=/tmp`**（**`-T /tmp`**）。詳細は **6-6-1** |
+| `rsync`: `failed to set times on ".../."` | **ディレクトリの時刻を NFS が拒否** | **`--omit-dir-times`**（**`-O`**）。詳細は **6-6-1** |
+| `rsync` / `cp`: `.../mods/mod-list.json`: **Permission denied** | **転送先が `factorio` 非所有**、または **S3 の空キー `mods/` がファイル扱い** | **`sudo chown -R factorio:factorio`** で揃える。改善しない場合は **6-6-1** の `ls -la` と S3 の `mods/` キー確認 |
 
 ログの参照先の例: `/var/log/amazon/efs/mount.log`（[efs-utils README](https://github.com/aws/efs-utils)）。
+
+### 6-8. logs をローカル出力して停止時に S3 同期する
+
+`saves/mods/config` を S3 Files 側で運用しつつ、`logs` はローカル出力 + 停止時同期とする場合の最小構成です。
+
+1. `factorio-dev.service` / `factorio-prod.service` の `WorkingDirectory` を `/opt/factorio/logs` に固定する。  
+2. 停止フローは「`/save` → logs 同期 → EC2 停止」の順序で実行する（直接 `StopInstances` しない）。  
+3. 同期先は `s3://<S3_BUCKET_NAME>/logs/` を環境別プレフィックスで分離する（例: `logs/env=dev/`）。
+
+同期コマンド例（EC2 上）:
+
+```bash
+aws s3 sync /opt/factorio/logs/ s3://<S3_BUCKET_NAME>/logs/env=<ENV>/instance=<INSTANCE_ID>/ --exclude "*" --include "factorio-*.log"
+```
+
+補足:
+
+- 同期順序の担保は Lambda 側（Executor の stop オーケストレーション）で実装する。
+- AMI + 起動オプション運用でも、停止経路を一本化すればログ退避漏れを抑えられる。
 
 ## 7. EC2 インスタンスへの IAM ロール割り当て
 
