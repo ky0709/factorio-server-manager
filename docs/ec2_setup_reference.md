@@ -137,7 +137,7 @@ sudo mkdir -p /opt/factorio
 sudo chown -R factorio:factorio /opt/factorio
 ```
 
-`awscli` は `/stop` 時の `logs` 同期（`aws s3 sync`）で利用します。未導入だと同期ステップが失敗し、停止オーケストレーションが中断されます。
+`awscli` は `/stop` 時の `logs` 退避（`aws s3 cp`）で利用します。未導入だと同期ステップが失敗し、停止オーケストレーションが中断されます。
 
 ## 5. Factorio サーバーのインストールと RCON 有効化
 
@@ -501,12 +501,17 @@ sudo mount -t s3files -v <S3_FILES_SYSTEM_ID>:/ /mnt/factorio-data
 
 1. `factorio-dev.service` / `factorio-prod.service` の `WorkingDirectory` を `/opt/factorio/logs` に固定する。  
 2. 停止フローは「`/save` → logs 同期 → EC2 停止」の順序で実行する（直接 `StopInstances` しない）。  
-3. 同期先は `s3://<S3_BUCKET_NAME>/logs/` を環境別プレフィックスで分離する（例: `logs/env=dev/`）。
+3. 同期先は `s3://<S3_BUCKET_NAME>/logs/date=YYYY-MM-DD/` とし、同日複数停止でも上書きしないようにセッションIDをファイル名へ付与する（例: `factorio-current__session-20260420T142530Z.log`）。
 
 同期コマンド例（EC2 上）:
 
 ```bash
-aws s3 sync /opt/factorio/logs/ s3://<S3_BUCKET_NAME>/logs/env=<ENV>/instance=<INSTANCE_ID>/ --exclude "*" --include "factorio-*.log"
+SESSION_ID=$(date -u +%Y%m%dT%H%M%SZ)
+LOG_DATE=${SESSION_ID:0:4}-${SESSION_ID:4:2}-${SESSION_ID:6:2}
+aws s3 cp /opt/factorio/logs/factorio-current.log "s3://<S3_BUCKET_NAME>/logs/date=${LOG_DATE}/factorio-current__session-${SESSION_ID}.log"
+aws s3 cp /opt/factorio/logs/factorio-previous.log "s3://<S3_BUCKET_NAME>/logs/date=${LOG_DATE}/factorio-previous__session-${SESSION_ID}.log"
+printf '{"session_id":"%s","utc_date":"%s","jst_date":"%s"}\n' "$SESSION_ID" "$LOG_DATE" "$(TZ=Asia/Tokyo date +%F)" > /tmp/session-${SESSION_ID}.json
+aws s3 cp /tmp/session-${SESSION_ID}.json "s3://<S3_BUCKET_NAME>/logs/date=${LOG_DATE}/session-${SESSION_ID}.json"
 ```
 
 補足:

@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 import sys
 from typing import Any
@@ -7,6 +6,8 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+
+VALID_TARGETS = ("saves", "logs", "mods", "config")
 
 
 def _load_environment(base_dir: str, env_name: str) -> str:
@@ -40,16 +41,10 @@ def _ask_confirmation(env_name: str, env_file: str) -> None:
             sys.exit(1)
 
 
-def _resolve_template_path(base_dir: str, template_arg: str) -> str:
-    if os.path.isabs(template_arg):
-        return template_arg
-    return os.path.join(base_dir, template_arg)
-
-
 def _get_required_int(name: str) -> int:
     raw = os.getenv(name, "").strip()
     if raw == "":
-        print(f"[ERROR] {name} is required for --from-env mode.")
+        print(f"[ERROR] {name} is required.")
         sys.exit(1)
     try:
         return int(raw)
@@ -132,29 +127,50 @@ def _build_rules_from_env() -> list[dict[str, Any]]:
     ]
 
 
-def _load_template_rules(base_dir: str, template_arg: str) -> list[dict[str, Any]]:
-    template_path = _resolve_template_path(base_dir, template_arg)
-    if not os.path.exists(template_path):
-        print(f"[ERROR] template not found: {template_path}")
-        sys.exit(1)
+def _parse_targets(targets_raw: str) -> list[str]:
+    parsed = []
+    for item in targets_raw.split(","):
+        target = item.strip().lower()
+        if not target:
+            continue
+        if target not in VALID_TARGETS:
+            print(f"[ERROR] Invalid target '{target}'. Use: {', '.join(VALID_TARGETS)}")
+            sys.exit(1)
+        if target not in parsed:
+            parsed.append(target)
 
-    try:
-        with open(template_path, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] invalid JSON template: {e}")
+    if not parsed:
+        print(f"[ERROR] --targets must include at least one of: {', '.join(VALID_TARGETS)}")
         sys.exit(1)
+    return parsed
 
-    lifecycle_payload = {"Rules": loaded["Rules"]} if "Rules" in loaded else loaded
-    if "Rules" not in lifecycle_payload or not isinstance(lifecycle_payload["Rules"], list):
-        print("[ERROR] template must contain a Rules array.")
+
+def _rule_prefix(rule: dict[str, Any]) -> str:
+    prefix = rule.get("Filter", {}).get("Prefix", "")
+    if isinstance(prefix, str):
+        return prefix
+    return ""
+
+
+def _filter_rules_by_targets(rules: list[dict[str, Any]], targets: list[str]) -> list[dict[str, Any]]:
+    target_prefixes = {f"{t}/" for t in targets}
+    filtered = [rule for rule in rules if _rule_prefix(rule) in target_prefixes]
+    if not filtered:
+        print("[ERROR] No lifecycle rules matched --targets in provided source.")
         sys.exit(1)
-    return lifecycle_payload["Rules"]
+    return filtered
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Apply S3 lifecycle configuration from a JSON template."
+        description="Apply S3 lifecycle configuration using .env settings.",
+        epilog=(
+            "Examples:\n"
+            "  python scripts/apply_s3_lifecycle.py dev\n"
+            "  python scripts/apply_s3_lifecycle.py dev --targets saves,logs\n"
+            "  python scripts/apply_s3_lifecycle.py prod --targets config"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "env",
@@ -163,24 +179,9 @@ def main() -> None:
         help="Target environment. Example: dev, prod",
     )
     parser.add_argument(
-        "--template",
-        default="",
-        help="Path to lifecycle JSON template (contains Rules array or full LifecycleConfiguration).",
-    )
-    parser.add_argument(
-        "--from-env",
-        action="store_true",
-        help="Build and apply rules from .env values for saves/logs/mods/config.",
-    )
-    parser.add_argument(
-        "--bucket",
-        default="",
-        help="Target S3 bucket name. Defaults to S3_BUCKET_NAME from env.",
-    )
-    parser.add_argument(
-        "--replace-all",
-        action="store_true",
-        help="Replace all existing rules instead of merging by rule ID.",
+        "--targets",
+        default="saves,logs,mods,config",
+        help="Comma-separated lifecycle targets. Allowed: saves,logs,mods,config",
     )
     args = parser.parse_args()
 
@@ -189,44 +190,37 @@ def main() -> None:
     env_file = _load_environment(base_dir, env_name)
     _ask_confirmation(env_name, env_file)
 
-    bucket = (args.bucket or os.getenv("S3_BUCKET_NAME", "")).strip()
+    bucket = os.getenv("S3_BUCKET_NAME", "").strip()
     if not bucket:
-        print("[ERROR] S3_BUCKET_NAME is not set. Use --bucket or set it in env.")
+        print("[ERROR] S3_BUCKET_NAME is not set in environment.")
         sys.exit(1)
+    targets = _parse_targets(args.targets)
 
-    if args.from_env:
-        rules_to_apply = _build_rules_from_env()
-        source_description = "env-based rules"
-    else:
-        if not args.template:
-            print("[ERROR] --template is required unless --from-env is specified.")
-            sys.exit(1)
-        rules_to_apply = _load_template_rules(base_dir, args.template)
-        source_description = _resolve_template_path(base_dir, args.template)
+    rules_to_apply = _filter_rules_by_targets(_build_rules_from_env(), targets)
+    source_description = f"env ({env_file}) targets={','.join(targets)}"
 
     s3 = boto3.client("s3")
 
-    if not args.replace_all:
-        try:
-            current = s3.get_bucket_lifecycle_configuration(Bucket=bucket)
-            current_rules = current.get("Rules", [])
-        except ClientError as e:
-            err_code = e.response.get("Error", {}).get("Code", "")
-            if err_code == "NoSuchLifecycleConfiguration":
-                current_rules = []
-            else:
-                raise
+    try:
+        current = s3.get_bucket_lifecycle_configuration(Bucket=bucket)
+        current_rules = current.get("Rules", [])
+    except ClientError as e:
+        err_code = e.response.get("Error", {}).get("Code", "")
+        if err_code == "NoSuchLifecycleConfiguration":
+            current_rules = []
+        else:
+            raise
 
-        merged_by_id = {rule.get("ID"): rule for rule in current_rules if rule.get("ID")}
-        no_id_rules = [rule for rule in current_rules if not rule.get("ID")]
-        for rule in rules_to_apply:
-            rule_id = rule.get("ID")
-            if not rule_id:
-                print("[ERROR] every rule must have an ID when using merge mode.")
-                sys.exit(1)
-            merged_by_id[rule_id] = rule
+    merged_by_id = {rule.get("ID"): rule for rule in current_rules if rule.get("ID")}
+    no_id_rules = [rule for rule in current_rules if not rule.get("ID")]
+    for rule in rules_to_apply:
+        rule_id = rule.get("ID")
+        if not rule_id:
+            print("[ERROR] every rule must have an ID.")
+            sys.exit(1)
+        merged_by_id[rule_id] = rule
 
-        rules_to_apply = no_id_rules + list(merged_by_id.values())
+    rules_to_apply = no_id_rules + list(merged_by_id.values())
 
     try:
         s3.put_bucket_lifecycle_configuration(
@@ -236,7 +230,7 @@ def main() -> None:
         print(f"[OK] Applied lifecycle configuration to s3://{bucket}")
         print(f"[INFO] Source: {source_description}")
         print(f"[INFO] Rules: {len(rules_to_apply)}")
-        print(f"[INFO] Mode: {'replace-all' if args.replace_all else 'merge-by-id'}")
+        print("[INFO] Mode: merge-by-id")
     except ClientError as e:
         print(f"[ERROR] Failed to apply lifecycle configuration: {e}")
         sys.exit(1)

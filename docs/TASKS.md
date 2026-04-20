@@ -186,11 +186,11 @@
     ・設計方針（着手時・バケットキー）: 本番と開発で **S3 バケットを分ける**（バケット名は `.env` の `S3_BUCKET_NAME`、公開ドキュメントではプレースホルダ）。バケット内のオブジェクトキーは **ルート直下**に `saves/`（既存の `SAVE_FILE_KEY=saves/save.zip` と整合）, `logs/`, `mods/`, `config/` を置く。`init_aws_resources.py` はバケット作成または既存確認の直後に、上記4プレフィックスを `saves/` と同様に空キーで確保する（冪等）。運用方針として `saves/mods/config` は S3 Files 側を常時参照し、`logs` はローカル出力（`/opt/factorio/logs`）を正として停止時に S3 へ同期する。初回のローカル→マウント先コピーで `rsync -a` が `chgrp` / `mkstemp` で失敗する場合は **`docs/ec2_setup_reference.md` の 6-6-1**（`--no-group`・`--temp-dir=/tmp` 等）を参照。
     ・完了条件: 上記キー構成に沿って `saves/mods/config` が S3 側の正として運用され、`logs` は停止時同期で S3 に集約されること。手順・実装・環境変数が追跡可能で、再起動・インスタンス再作成後も同一データを継続利用できること。
 
-[ ] ID:034 [FEAT] [OPS] EC2 起動/停止オーケストレーション（save->logs同期->stop）を自動化
+[x] ID:034 [FEAT] [OPS] EC2 起動/停止オーケストレーション（save->logs同期->stop）を自動化
     ・関連箇所: docs/ec2_setup_reference.md, scripts/init_aws_resources.py, aws/Lambda/Factorio_Executor/lambda_function.py
-    ・背景: S3 Files の手動確認・補正手順が残っており、インスタンス再作成や初回起動時の運用負荷が高いため。
+    ・背景: S3 Files の手動確認・補正手順が残っており、インスタンス再作成や初回起動時の運用負荷が高いため。なお、受け入れ前提の `ID:046/047/048` は完了済みで、残論点は「起動時マウント/リンクの自動安定適用」と「`/mnt/factorio-data/logs` の削除または空ディレクトリ維持の明示判断」の証跡化。加えて、同日複数回の停止でもログが上書きされないよう、`logs/date=YYYY-MM-DD/` 配下を UTC セッションID付きファイル名へ移行する必要があった。
     ・運用メモ: dev/prod はバケット分離済みかつ現時点は 1環境1サーバー想定のため、停止時ログ同期先は `logs/` に固定する（`logs/env=.../instance=...` は採用しない）。
-    ・完了条件: 起動時に必要なマウントとリンク設定が自動で安定適用され、手動介入なしでゲーム実行パスが揃うこと。停止フローで `save` → `logs` の S3 同期 → EC2 停止の順序を強制し、AMI + 起動オプション運用でもログ退避漏れを防げること。`SERVICE_UNIT_NAME` を `.env` / SSM 経由で指定し、停止対象ユニットを環境ごとに明示管理できること。移行完了後に未使用となる `/mnt/factorio-data/logs` の削除（または空ディレクトリ維持の明示判断）を実施し、消し忘れを防ぐこと。
+    ・完了条件: 起動時に必要なマウントとリンク設定が自動で安定適用され、手動介入なしでゲーム実行パスが揃うこと。停止フローで `save` → `logs` の S3 同期 → EC2 停止の順序を強制し、AMI + 起動オプション運用でもログ退避漏れを防げること。`SERVICE_UNIT_NAME` を `.env` / SSM 経由で指定し、停止対象ユニットを環境ごとに明示管理できること。移行完了後に未使用となる `/mnt/factorio-data/logs` の削除（または空ディレクトリ維持の明示判断）を実施し、消し忘れを防ぐこと。加えて受け入れ条件として「ID:046（ライフサイクル権限）完了」「ID:047（dev 4ルール適用確認）完了」「ID:048（`logs/date=YYYY-MM-DD/` 着地確認）完了」を満たし、停止時ログが `factorio-<kind>__session-<UTC>.log` と `session-<UTC>.json` で保存されること。
 
 [ ] ID:035 [FEAT] [UI] Discord `/config` コマンドで server-settings を管理
     ・関連箇所: scripts/register.py, aws/Lambda/Factorio_Interactor/lambda_function.py, aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/factorio_common_layer/python/factorio_common/utils.py
@@ -247,24 +247,24 @@
     ・背景: saves/logs/mods/config の保持方針が環境ごとに異なり、テンプレートJSON直接編集だと運用差分追跡と再適用が煩雑なため。
     ・完了条件: ルール名と主要保持パラメータ（経過日数・保持バージョン数）が `.env.<env>` で管理でき、`apply_s3_lifecycle.py` で環境設定から一括適用できること。AWS Lifecycle仕様上の制約事項（件数保持の限界）が実行時メッセージで把握できること。
 
-[ ] ID:046 [TASK] [SEC] ライフサイクル適用権限（Get/PutLifecycleConfiguration）をRegist系ポリシーへ追加
+[x] ID:046 [TASK] [SEC] ライフサイクル適用権限（Get/PutLifecycleConfiguration）をRegist系ポリシーへ追加
     ・関連箇所: aws/IAM/FactorioRegistPolicy/policy.json.example, scripts/deploy_policies.py, docs/TASKS.md
-    ・背景: dev検証時に `FactorioRegistUser-dev` が lifecycle 設定の取得/反映権限不足でブロックしているため。ID:034/045 の検証前提を先に解消する必要があるため。
+    ・背景: dev 検証で `deploy_policies.py dev` 実行後、`get-bucket-lifecycle-configuration` と `put-bucket-lifecycle-configuration` を再検証し、AccessDenied なく通過することを確認できたため。ID:034/045 の検証前提を解消できたため。
     ・完了条件: `deploy_policies.py dev` 後に `get-bucket-lifecycle-configuration` と `put-bucket-lifecycle-configuration` が AccessDenied なく実行できること。
 
-[ ] ID:047 [TASK] [OPS] dev環境へ lifecycle 4ルールを適用し期待保持条件を確認
+[x] ID:047 [TASK] [OPS] dev環境へ lifecycle 4ルールを適用し期待保持条件を確認
     ・関連箇所: scripts/apply_s3_lifecycle.py, .env.dev, aws/S3/Lifecycle/*.lifecycle.json.example, docs/TASKS.md
-    ・背景: ID:045 の設定駆動化を実運用で成立させるため、dev バケットで `saves/logs/mods/config` のルール反映をCLIで検証する必要があるため。
+    ・背景: `apply_s3_lifecycle.py dev` 実行後に `get-bucket-lifecycle-configuration` で `saves/logs/mods/config` の 4ルール（ID・Prefix・保持日数・保持バージョン数）が `.env.dev` と一致することを確認できたため。
     ・完了条件: dev バケットの lifecycle 構成に 4ルールが反映され、ルール名・保持日数・保持バージョン数が `.env.dev` 設定値と一致していること。
 
-[ ] ID:048 [TASK] [OPS] `/start -> /stop` 実行で `logs/date=YYYY-MM-DD/` 着地を再確認
+[x] ID:048 [TASK] [OPS] `/start -> /stop` 実行で `logs/date=YYYY-MM-DD/` 着地を再確認
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, scripts/test_runner.py, docs/TASKS.md
-    ・背景: 停止シーケンス実行自体は確認できたが、当日プレフィックス配下にログオブジェクト着地が確認できず、ID:034 の完了条件に対する検証証跡が不足しているため。
+    ・背景: 当初は `logs/env=.../instance=...` への着地となっていたが、Executor のデプロイ反映後に `/start -> /stop` を再実行し、`logs/date=2026-04-20/` 配下への着地（`factorio-current.log` / `factorio-previous.log`）を確認できたため。
     ・完了条件: stop 実行後に `logs/date=YYYY-MM-DD/` へオブジェクトが存在することをCLIで確認でき、未着地時は原因（空ディレクトリ/同期失敗/権限）と再実行手順が記録されること。
 
-[ ] ID:049 [TASK] [OPS] ID:034 の受け入れ条件をサブタスク完了ベースで再定義
+[x] ID:049 [TASK] [OPS] ID:034 の受け入れ条件をサブタスク完了ベースで再定義
     ・関連箇所: docs/TASKS.md, docs/ec2_setup_reference.md
-    ・背景: ID:034 配下に横断作業（権限・lifecycle・実機検証）が増え、完了判定が曖昧化しているため。レビューとマージ判断を安定させる必要があるため。
+    ・背景: ID:034 の完了判定に必要なサブタスク依存を `ID:046/047/048` として明文化し、`ID:048` 実測完了（`logs/date=2026-04-20/` 着地確認）を反映してレビュー/マージ判断の境界を固定できたため。
     ・完了条件: ID:046/047/048 の完了を前提とした ID:034 の最終チェックリストが文書化され、完了/未完の境界が明確になっていること。
 
 ## ステップ横断の考慮事項（開発・着手前チェック）

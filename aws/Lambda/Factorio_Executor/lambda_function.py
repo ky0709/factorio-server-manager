@@ -548,9 +548,23 @@ def handle_stop(event, ec2, inst, state, ip, locale):
                     )
 
                 sync_cmd = (
+                    "SESSION_ID=$(date -u +%Y%m%dT%H%M%SZ) && "
                     "LOG_DATE=$(date -u +%F) && "
-                    f"aws s3 sync /opt/factorio/logs/ s3://{bucket}/logs/date=${{LOG_DATE}}/ "
-                    "--exclude \"*\" --include \"factorio-*.log\""
+                    f"DEST=s3://{bucket}/logs/date=${{LOG_DATE}}/ && "
+                    "SYNCED=0 && "
+                    "for src in /opt/factorio/logs/factorio-*.log; do "
+                    "  [ -f \"$src\" ] || continue; "
+                    "  base=$(basename \"$src\" .log); "
+                    "  aws s3 cp \"$src\" \"${DEST}${base}__session-${SESSION_ID}.log\" >/dev/null && SYNCED=1; "
+                    "done && "
+                    "UTC_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ) && "
+                    "JST_TS=$(TZ=Asia/Tokyo date +%Y-%m-%dT%H:%M:%S%z) && "
+                    "JST_DATE=$(TZ=Asia/Tokyo date +%F) && "
+                    "printf '{\"session_id\":\"%s\",\"utc_timestamp\":\"%s\",\"jst_timestamp\":\"%s\",\"utc_date\":\"%s\",\"jst_date\":\"%s\",\"instance_id\":\"%s\"}\\n' "
+                    f"\"$SESSION_ID\" \"$UTC_TS\" \"$JST_TS\" \"$LOG_DATE\" \"$JST_DATE\" \"{config['instance_id']}\" > /tmp/session-${{SESSION_ID}}.json && "
+                    "aws s3 cp /tmp/session-${SESSION_ID}.json \"${DEST}session-${SESSION_ID}.json\" >/dev/null && "
+                    "rm -f /tmp/session-${SESSION_ID}.json && "
+                    "if [ \"$SYNCED\" -ne 1 ]; then echo \"no factorio-*.log found\"; fi"
                 )
                 sync_ok, sync_status, sync_out, sync_err = _run_ssm_shell_and_wait(
                     ssm,

@@ -32,8 +32,8 @@ Amazon S3 Files の導入と、4層構造（Interactor/Executor/Worker/Notifier�
 
 [x] `/saves` の S3 統合（`saves/save.zip`）と履歴運用の確立。
 [ ] `/mods`, `/config` を S3 バケットへ統合し、再作成後も同一データを参照できるようにする。
-[ ] `logs` はローカル出力（`/opt/factorio/logs`）を維持し、停止時に S3 (`logs/`) へ同期する運用を実装。
-[ ] EC2 起動時の自動マウント・リンク設定の最適化。
+[x] `logs` はローカル出力（`/opt/factorio/logs`）を維持し、停止時に S3 (`logs/`) へ同期する運用を実装（セッションID付きログ + `session-<UTC>.json` を保存）。
+[x] EC2 起動時の自動マウント・リンク設定の最適化。
 
 🧭 Step 4: Discord リモート管理の枠組み整備
 先行してコマンド枠組みと権限制御のみ整備し、本機能は後続ステップで実装する。
