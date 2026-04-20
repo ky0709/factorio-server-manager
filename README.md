@@ -134,6 +134,8 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 1. **[ローカル]** `.env.example` をコピーして `.env` または `.env.dev` を作成し、必要な設定値を入力する。
 2. **[ローカル]** `pip install -r requirements.txt` を実行して依存ライブラリをインストールする。
 3. **[ローカル]** `aws configure --profile <profile_name>` を実行（開発用なら `factorio-dev`、本番用なら `factorio-prod` 等）し、適切な権限を持つプロファイルを作成する。
+4. **[ローカル]** `.env` / `.env.dev` の `SERVICE_UNIT_NAME` を対象環境の systemd ユニット名へ設定する（例: `factorio`, `factorio-dev`, `factorio-prod`）。
+   - 本プロジェクトの標準構成（Factorio専用EC2）ではリスクは低いが、独自構築サーバーで他プロセス/他ユニットを同居させる場合は、誤ったユニット名を指定すると意図しないサービス停止リスクがあるため、適用前に `systemctl status <SERVICE_UNIT_NAME>` で対象を確認すること。
 
 ### 2. AWS：インフラリソースの構築
 1. **[ローカル]** `python scripts/init_aws_resources.py <env>` を実行し、S3, DynamoDB, IAM Role, EventBridge, Lambda の器を自動作成する。

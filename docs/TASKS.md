@@ -189,6 +189,7 @@
 [ ] ID:034 [FEAT] [OPS] EC2 起動/停止オーケストレーション（save->logs同期->stop）を自動化
     ・関連箇所: docs/ec2_setup_reference.md, scripts/init_aws_resources.py, aws/Lambda/Factorio_Executor/lambda_function.py
     ・背景: S3 Files の手動確認・補正手順が残っており、インスタンス再作成や初回起動時の運用負荷が高いため。
+    ・運用メモ: dev/prod はバケット分離済みかつ現時点は 1環境1サーバー想定のため、停止時ログ同期先は `logs/` に固定する（`logs/env=.../instance=...` は採用しない）。
     ・完了条件: 起動時に必要なマウントとリンク設定が自動で安定適用され、手動介入なしでゲーム実行パスが揃うこと。停止フローで `save` → `logs` の S3 同期 → EC2 停止の順序を強制し、AMI + 起動オプション運用でもログ退避漏れを防げること。`SERVICE_UNIT_NAME` を `.env` / SSM 経由で指定し、停止対象ユニットを環境ごとに明示管理できること。移行完了後に未使用となる `/mnt/factorio-data/logs` の削除（または空ディレクトリ維持の明示判断）を実施し、消し忘れを防ぐこと。
 
 [ ] ID:035 [FEAT] [UI] Discord `/config` コマンドで server-settings を管理
@@ -235,6 +236,36 @@
     ・関連箇所: scripts/register.py, docs/ec2_setup_reference.md
     ・背景: `python scripts/register.py <env>` 実行時に全キーへ `PutParameter` を発行しており、値が同一でも API リクエストとバージョン増加が発生するため。
     ・完了条件: SSM の既存値と型が一致する場合は `PutParameter` をスキップし、更新件数とスキップ件数が実行ログで確認できること。併せて、停止時 logs 同期に必要な `awscli` 依存がセットアップ手順へ明記されていること。
+
+[x] ID:044 [TASK] [OPS] logs日付プレフィックス運用とS3ライフサイクル適用スクリプトを整備
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, scripts/apply_s3_lifecycle.py, aws/S3/Lifecycle/*.json.example
+    ・背景: `/stop` の logs 同期を Athena/Glue 向け日付プレフィックスで管理しつつ、saves/mods/config/logs の保持期間を運用として明示的に制御する必要があるため。
+    ・完了条件: logs 同期先が `logs/date=YYYY-MM-DD/` へ変更され、バージョニング有効バケットでも運用可能なライフサイクルルールを `saves/mods/config/logs` それぞれに適用できるスクリプトとテンプレートJSONが用意されていること。
+
+[ ] ID:045 [TASK] [OPS] S3ライフサイクル方針を環境変数駆動へ移行
+    ・関連箇所: scripts/apply_s3_lifecycle.py, .env.example, docs/TASKS.md
+    ・背景: saves/logs/mods/config の保持方針が環境ごとに異なり、テンプレートJSON直接編集だと運用差分追跡と再適用が煩雑なため。
+    ・完了条件: ルール名と主要保持パラメータ（経過日数・保持バージョン数）が `.env.<env>` で管理でき、`apply_s3_lifecycle.py` で環境設定から一括適用できること。AWS Lifecycle仕様上の制約事項（件数保持の限界）が実行時メッセージで把握できること。
+
+[ ] ID:046 [TASK] [SEC] ライフサイクル適用権限（Get/PutLifecycleConfiguration）をRegist系ポリシーへ追加
+    ・関連箇所: aws/IAM/FactorioRegistPolicy/policy.json.example, scripts/deploy_policies.py, docs/TASKS.md
+    ・背景: dev検証時に `FactorioRegistUser-dev` が lifecycle 設定の取得/反映権限不足でブロックしているため。ID:034/045 の検証前提を先に解消する必要があるため。
+    ・完了条件: `deploy_policies.py dev` 後に `get-bucket-lifecycle-configuration` と `put-bucket-lifecycle-configuration` が AccessDenied なく実行できること。
+
+[ ] ID:047 [TASK] [OPS] dev環境へ lifecycle 4ルールを適用し期待保持条件を確認
+    ・関連箇所: scripts/apply_s3_lifecycle.py, .env.dev, aws/S3/Lifecycle/*.lifecycle.json.example, docs/TASKS.md
+    ・背景: ID:045 の設定駆動化を実運用で成立させるため、dev バケットで `saves/logs/mods/config` のルール反映をCLIで検証する必要があるため。
+    ・完了条件: dev バケットの lifecycle 構成に 4ルールが反映され、ルール名・保持日数・保持バージョン数が `.env.dev` 設定値と一致していること。
+
+[ ] ID:048 [TASK] [OPS] `/start -> /stop` 実行で `logs/date=YYYY-MM-DD/` 着地を再確認
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, scripts/test_runner.py, docs/TASKS.md
+    ・背景: 停止シーケンス実行自体は確認できたが、当日プレフィックス配下にログオブジェクト着地が確認できず、ID:034 の完了条件に対する検証証跡が不足しているため。
+    ・完了条件: stop 実行後に `logs/date=YYYY-MM-DD/` へオブジェクトが存在することをCLIで確認でき、未着地時は原因（空ディレクトリ/同期失敗/権限）と再実行手順が記録されること。
+
+[ ] ID:049 [TASK] [OPS] ID:034 の受け入れ条件をサブタスク完了ベースで再定義
+    ・関連箇所: docs/TASKS.md, docs/ec2_setup_reference.md
+    ・背景: ID:034 配下に横断作業（権限・lifecycle・実機検証）が増え、完了判定が曖昧化しているため。レビューとマージ判断を安定させる必要があるため。
+    ・完了条件: ID:046/047/048 の完了を前提とした ID:034 の最終チェックリストが文書化され、完了/未完の境界が明確になっていること。
 
 ## ステップ横断の考慮事項（開発・着手前チェック）
 

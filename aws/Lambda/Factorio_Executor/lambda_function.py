@@ -183,7 +183,8 @@ def _run_ssm_shell_and_wait(ssm, instance_id, commands, timeout_seconds=180):
     except Exception as e:
         return False, "SendCommandFailed", "", str(e)
 
-    deadline = time.time() + timeout_seconds + 30
+    # Lambda timeout を超えにくくするため、待機余裕は最小限にする
+    deadline = time.time() + timeout_seconds + 10
     while time.time() < deadline:
         try:
             inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
@@ -195,12 +196,29 @@ def _run_ssm_shell_and_wait(ssm, instance_id, commands, timeout_seconds=180):
                     (inv.get('StandardOutputContent') or '').strip(),
                     (inv.get('StandardErrorContent') or '').strip()
                 )
-        except Exception:
+        except Exception as e:
+            msg = str(e)
             # Invocation がまだ反映されていない瞬間は再試行
-            pass
+            if "InvocationDoesNotExist" in msg:
+                pass
+            else:
+                # 権限不足など恒久エラーは待機せず即失敗
+                return False, "GetInvocationFailed", "", msg
         time.sleep(3)
 
-    return False, "WaitTimeout", "", f"SSM command did not finish within {timeout_seconds + 30}s"
+    return False, "WaitTimeout", "", f"SSM command did not finish within {timeout_seconds + 10}s"
+
+
+def _resolve_service_unit_name():
+    """
+    停止対象の systemd ユニット名を解決する。
+    優先: SERVICE_UNIT_NAME（SSM経由: service_unit_name）
+    後方互換: 未設定時は従来の候補チェーンを使う。
+    """
+    unit = (config.get('service_unit_name') or '').strip()
+    if unit:
+        return f"sudo systemctl stop {unit}", False
+    return "sudo systemctl stop factorio-dev || sudo systemctl stop factorio-prod || sudo systemctl stop factorio", True
 
 def init_config():
     try:
@@ -472,79 +490,98 @@ def handle_stop(event, ec2, inst, state, ip, locale):
                 ExpressionAttributeValues={':val': str(start_stop_time)}
             )
 
-            # テストモード以外の場合のみ、実際のセーブ処理を実行
-            if not config.get("test_mode"):
-                # 1. セーブの実行 (RCON)
-                run_rcon_command(ip, config['rcon_port'], config['rcon_password'], "/server-save")
-                
-                # カタログ (DynamoDB) を更新
-                update_latest_save_info(datetime.now(JST).isoformat())
-            else:
-                print("DEBUG: [Test Mode] Skipping RCON save and catalog update in stop sequence.")
+            # 1. 先行 /server-save は行わない。
+            # 停止時の SIGTERM で Factorio 本体が save.zip を保存するため、
+            # ここではプロセス停止完了後にカタログ更新のみ実施する。
+            if config.get("test_mode"):
+                print("DEBUG: [Test Mode] Skipping save catalog update in stop sequence.")
 
             # 2. Factorioサーバー停止 (SSM)
             ssm = get_client('ssm')
+            stop_command, used_fallback = _resolve_service_unit_name()
+            if used_fallback:
+                notify("⚠️ [LOG] SERVICE_UNIT_NAME is not set. Using fallback service chain (factorio-dev/prod/default).", mode='log')
+
+            # systemctl stop が長時間ブロックする環境があるため、no-block で発行して
+            # is-active のポーリングで停止完了を判定する。
+            target_unit = config.get('service_unit_name', '').strip() or 'factorio-dev'
+            stop_poll_command = (
+                f"sudo systemctl --no-block stop {target_unit}; "
+                f"for i in $(seq 1 30); do "
+                f"  state=$(systemctl is-active {target_unit} 2>/dev/null || true); "
+                f"  echo \"[stop-poll] unit={target_unit} attempt=${{i}} state=${{state}}\"; "
+                f"  if [ \"${{state}}\" = \"inactive\" ] || [ \"${{state}}\" = \"failed\" ]; then exit 0; fi; "
+                f"  sleep 2; "
+                f"done; "
+                f"echo \"service stop polling timeout (last_state=$(systemctl is-active {target_unit} 2>/dev/null || true))\"; "
+                f"exit 124"
+            )
             stop_ok, stop_status, stop_out, stop_err = _run_ssm_shell_and_wait(
                 ssm,
                 config['instance_id'],
-                ["sudo systemctl stop factorio-dev || sudo systemctl stop factorio-prod || sudo systemctl stop factorio"],
-                timeout_seconds=180
+                [stop_poll_command],
+                timeout_seconds=75
             )
             if not stop_ok:
+                if stop_out:
+                    notify(f"⚠️ [LOG] Stop polling output before failure: {stop_out}", mode='log')
                 notify(f"⚠️ [LOG] Failed to stop Factorio service before EC2 stop. status={stop_status} stderr={stop_err}", mode='log')
                 return (
-                    "⚠️ 停止前のFactorioサービス停止に失敗しました。EC2停止を中断しました。ログを確認してください。"
+                    "⚠️ 停止前のFactorioサービス停止に失敗しました。EC2停止を中断しました。管理者にログ確認を依頼してください。必要に応じて再度 /stop を実行してください。"
                     if locale == 'ja'
-                    else "⚠️ Failed to stop Factorio service before shutdown. EC2 stop was aborted. Check logs."
+                    else "⚠️ Failed to stop Factorio service before shutdown. EC2 stop was aborted. Please ask an administrator to check logs and run /stop again if needed."
                 )
 
-            # 3. logs を S3 へ同期 (SSM)
+            # 3. 停止完了後の save 時刻をカタログへ反映
             if not config.get("test_mode"):
-                env_label = _infer_env_label()
+                update_latest_save_info(datetime.now(JST).isoformat())
+
+            # 4. logs を S3 へ同期 (SSM)
+            if not config.get("test_mode"):
                 bucket = (config.get('s3_bucket_name') or '').strip()
                 if not bucket:
                     notify("⚠️ [LOG] s3_bucket_name is missing. Skipping EC2 stop to avoid log loss.", mode='log')
                     return (
-                        "⚠️ S3バケット設定が見つからないため、ログ退避漏れ防止のためEC2停止を中断しました。"
+                        "⚠️ S3バケット設定が見つからないため、ログ退避漏れ防止のためEC2停止を中断しました。管理者にログ確認を依頼してください。必要に応じて再度 /stop を実行してください。"
                         if locale == 'ja'
-                        else "⚠️ S3 bucket config is missing. EC2 stop was aborted to avoid log loss."
+                        else "⚠️ S3 bucket config is missing. EC2 stop was aborted to avoid log loss. Please ask an administrator to check logs and run /stop again if needed."
                     )
 
                 sync_cmd = (
-                    f"INSTANCE_ID=$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id || echo {config['instance_id']}) && "
-                    f"aws s3 sync /opt/factorio/logs/ s3://{bucket}/logs/env={env_label}/instance=${{INSTANCE_ID}}/ "
+                    "LOG_DATE=$(date -u +%F) && "
+                    f"aws s3 sync /opt/factorio/logs/ s3://{bucket}/logs/date=${{LOG_DATE}}/ "
                     "--exclude \"*\" --include \"factorio-*.log\""
                 )
                 sync_ok, sync_status, sync_out, sync_err = _run_ssm_shell_and_wait(
                     ssm,
                     config['instance_id'],
                     [sync_cmd],
-                    timeout_seconds=300
+                    timeout_seconds=70
                 )
                 if not sync_ok:
                     notify(f"⚠️ [LOG] Failed to sync logs before EC2 stop. status={sync_status} stderr={sync_err}", mode='log')
                     return (
-                        "⚠️ logs の S3 同期に失敗したため、EC2停止を中断しました。"
+                        "⚠️ logs の S3 同期に失敗したため、EC2停止を中断しました。管理者にログ確認を依頼してください。必要に応じて再度 /stop を実行してください。"
                         if locale == 'ja'
-                        else "⚠️ Failed to sync logs to S3. EC2 stop was aborted."
+                        else "⚠️ Failed to sync logs to S3. EC2 stop was aborted. Please ask an administrator to check logs and run /stop again if needed."
                     )
             else:
                 print("DEBUG: [Test Mode] Skipping logs sync in stop sequence.")
 
-            # 4. アンマウント実行 (SSM)
+            # 5. アンマウント実行 (SSM)
             # サービス停止後、少し待ってから実行
             time.sleep(5)
             _run_ssm_shell_and_wait(
                 ssm,
                 config['instance_id'],
                 ["sudo umount /mnt/factorio-data || true"],
-                timeout_seconds=120
+                timeout_seconds=20
             )
             
-            # 5. EC2停止
+            # 6. EC2停止
             ec2.stop_instances(InstanceIds=[config['instance_id']])
             
-            # 6. セッションパスワードのクリア
+            # 7. セッションパスワードのクリア
             try:
                 factorio_state_table.delete_item(Key={'ConfigKey': 'ActivePassword'})
                 # 停止時にもカウントをリセット
@@ -554,7 +591,7 @@ def handle_stop(event, ec2, inst, state, ip, locale):
             except Exception as e:
                 print(f"⚠️ Failed to clear active password: {e}")
 
-            # 7. メインチャットへの完了報告 (これによって Interactor のメッセージが PATCH される)
+            # 8. メインチャットへの完了報告 (これによって Interactor のメッセージが PATCH される)
             return get_msg("stop", "process_stopped", locale)
         return get_msg("stop", "already", locale)
 

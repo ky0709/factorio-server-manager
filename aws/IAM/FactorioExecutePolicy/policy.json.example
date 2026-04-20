@@ -51,6 +51,14 @@
             ]
         },
         {
+            "Sid": "AllowSSMCommandInvocationRead",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetCommandInvocation"
+            ],
+            "Resource": "*"
+        },
+        {
             "Sid": "AllowKMSDecrypt",
             "Effect": "Allow",
             "Action": [

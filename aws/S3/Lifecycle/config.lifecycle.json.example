@@ -1,0 +1,20 @@
+{
+  "Rules": [
+    {
+      "ID": "config-expire-after-7-days",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "config/"
+      },
+      "Expiration": {
+        "Days": 7
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 7
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "Rules": [
+    {
+      "ID": "mods-expire-after-7-days",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "mods/"
+      },
+      "Expiration": {
+        "Days": 7
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 7
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
+    }
+  ]
+}
