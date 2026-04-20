@@ -61,6 +61,7 @@ PARAMETERS_TO_SYNC = {
     'INTERACTOR_LAMBDA_NAME': f'{SSM_BASE}INTERACTOR_LAMBDA_NAME',
     'AWS_REGION': f'{SSM_BASE}REGION',
     'INSTANCE_ID': f'{SSM_BASE}INSTANCE_ID',
+    'SERVICE_UNIT_NAME': f'{SSM_BASE}SERVICE_UNIT_NAME',
     'EPHEMERAL_COMMAND_STRINGS': f'{SSM_BASE}EPHEMERAL_COMMAND_STRINGS',
     'DYNAMODB_TABLE_NAME': f'{SSM_BASE}DYNAMODB_TABLE_NAME',
     'S3_BUCKET_NAME': f'{SSM_BASE}S3_BUCKET_NAME',
@@ -245,7 +246,8 @@ def register_commands():
 def sync_secrets_to_ssm():
     print("\n--- Syncing Secrets to AWS SSM Parameter Store ---")
     has_error = False
-    has_error = False
+    synced_count = 0
+    skipped_count = 0
     try:
         ssm = boto3.client(
             'ssm',
@@ -274,6 +276,21 @@ def sync_secrets_to_ssm():
 
             print(f"🔄 Syncing {env_key} to {ssm_path}...")
             parameter_type = 'SecureString' if env_key in SECURE_STRING_KEYS else 'String'
+            current_value = None
+            current_type = None
+            try:
+                current_param = ssm.get_parameter(Name=ssm_path, WithDecryption=True).get('Parameter', {})
+                current_value = current_param.get('Value')
+                current_type = current_param.get('Type')
+            except ClientError as e:
+                if e.response.get('Error', {}).get('Code') != 'ParameterNotFound':
+                    raise
+
+            if current_value == value and current_type == parameter_type:
+                print(f"⏭️  Skipped {env_key}: unchanged")
+                skipped_count += 1
+                continue
+
             ssm.put_parameter(
                 Name=ssm_path,
                 Value=value,
@@ -282,7 +299,10 @@ def sync_secrets_to_ssm():
                 Overwrite=True
             )
             print(f"✅ Successfully synced {env_key} as {parameter_type}")
+            synced_count += 1
             time.sleep(0.2)
+
+        print(f"📊 SSM sync summary: updated={synced_count}, skipped={skipped_count}")
 
         # --- Lambda キャッシュのリフレッシュ ---
         print("\n--- Refreshing Lambda Caches ---")

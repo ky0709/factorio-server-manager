@@ -47,7 +47,8 @@
 [ ] ID:006 [TASK] [LOGIC] サーバー起動ロジックをSTATIC/DYNAMICのハイブリッド運用へ拡張
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Worker/lambda_function.py, scripts/register.py, scripts/check_env_leaks.py, .env.example, README.md, aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioWorkPolicy/policy.json.example
     ・背景: 固定インスタンスの起動停止運用を維持しつつ、起動テンプレート経由の新規作成（spot/ondemand）と終了を切り替え可能にし、運用コストと可用性の選択肢を持たせる必要があるため。Executor が肥大化しているため、**ID:039 で同一 Lambda 内モジュール分割を先行**し、その境界に沿ってハイブリッド分岐を載せる（巨大関数への if 積み増しを避ける）。
-    ・完了条件: SERVER_RUN_MODEおよびINSTANCE_PROVISIONING_TYPEを使った分岐方針、起動テンプレート利用時のrun/terminateフロー、アクティブInstanceIdの保持先（DynamoDB等）、Spot中断時の退避方針、必要IAM権限の差分、実装着手手順（ブランチ作成開始を含む）がコード内TODOとTASKS.mdから追跡可能になっていること。**ID:039 完了後に本ロジックを実装**し、稼働検証後に **ID:040** で Lambda 物理分割の要否を判断すること。
+    ・完了条件: `SERVER_RUN_MODE`（`STATIC`/`DYNAMIC`）・`DYNAMIC_CAPACITY_MODE`（`ONDEMAND`/`SPOT`）・`INSTANCE_LIFECYCLE_MODE`（`PERSISTENT`/`EPHEMERAL`）を使った分岐方針、起動テンプレート利用時の run/terminate フロー、アクティブInstanceIdの保持先（DynamoDB等）、Spot中断時の退避方針、必要IAM権限の差分、実装着手手順（ブランチ作成開始を含む）がコード内TODOとTASKS.mdから追跡可能になっていること。**ID:039 完了後に本ロジックを実装**し、稼働検証後に **ID:040** で Lambda 物理分割の要否を判断すること。
+    ・メモ（後対応）: `.env` 全項目の詳細リファレンス（例: `docs/env_reference.md`）は後続で作成する。`STATIC -> DYNAMIC` 切替時の既存インスタンス自動整理（save/logs同期後に stop/terminate）も Step 5 本実装で扱う。`SERVICE_UNIT_NAME` については、標準の Factorio 専用EC2 ではリスク低めだが、他プロセス同居サーバーでは誤ユニット停止リスクがある旨をリファレンスへ明記する。
 
 [x] ID:007 [FIX] [LOGIC] deploy_policies.py の環境読込優先度を修正
     ・関連箇所: scripts/deploy_policies.py
@@ -188,7 +189,7 @@
 [ ] ID:034 [FEAT] [OPS] EC2 起動/停止オーケストレーション（save->logs同期->stop）を自動化
     ・関連箇所: docs/ec2_setup_reference.md, scripts/init_aws_resources.py, aws/Lambda/Factorio_Executor/lambda_function.py
     ・背景: S3 Files の手動確認・補正手順が残っており、インスタンス再作成や初回起動時の運用負荷が高いため。
-    ・完了条件: 起動時に必要なマウントとリンク設定が自動で安定適用され、手動介入なしでゲーム実行パスが揃うこと。停止フローで `save` → `logs` の S3 同期 → EC2 停止の順序を強制し、AMI + 起動オプション運用でもログ退避漏れを防げること。移行完了後に未使用となる `/mnt/factorio-data/logs` の削除（または空ディレクトリ維持の明示判断）を実施し、消し忘れを防ぐこと。
+    ・完了条件: 起動時に必要なマウントとリンク設定が自動で安定適用され、手動介入なしでゲーム実行パスが揃うこと。停止フローで `save` → `logs` の S3 同期 → EC2 停止の順序を強制し、AMI + 起動オプション運用でもログ退避漏れを防げること。`SERVICE_UNIT_NAME` を `.env` / SSM 経由で指定し、停止対象ユニットを環境ごとに明示管理できること。移行完了後に未使用となる `/mnt/factorio-data/logs` の削除（または空ディレクトリ維持の明示判断）を実施し、消し忘れを防ぐこと。
 
 [ ] ID:035 [FEAT] [UI] Discord `/config` コマンドで server-settings を管理
     ・関連箇所: scripts/register.py, aws/Lambda/Factorio_Interactor/lambda_function.py, aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/factorio_common_layer/python/factorio_common/utils.py
@@ -224,6 +225,16 @@
     ・関連箇所: docs/TASKS.md, docs/roadmap.md
     ・背景: ロードマップ上は別ステップでも、着手順を誤ると再作業や権限・テスト不足が重なるため、開発者向けの前提を単一箇所にまとめる必要があるため。
     ・完了条件: 本条直後の「ステップ横断の考慮事項」節が追加され、主要 ID への参照が付いていること。
+
+[ ] ID:042 [TASK] [LOGIC] `/stop` 同時実行ガード（ロック機構）を導入
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, docs/TASKS.md
+    ・背景: `/stop` が短時間に複数回実行されると StopStartTime 更新や SSM コマンド実行が競合し、停止シーケンスの結果と通知が不整合になるリスクがあるため。
+    ・完了条件: 停止処理中（ロック中）は追加 `/stop` を実行せず「停止中」応答のみ返すこと。ロック取得・解放の条件が明文化され、異常時にロックが残留しないガード（TTLまたは再取得条件）を備えること。
+
+[x] ID:043 [FIX] [OPS] register.py のSSM同期で未変更パラメータを更新スキップ
+    ・関連箇所: scripts/register.py, docs/ec2_setup_reference.md
+    ・背景: `python scripts/register.py <env>` 実行時に全キーへ `PutParameter` を発行しており、値が同一でも API リクエストとバージョン増加が発生するため。
+    ・完了条件: SSM の既存値と型が一致する場合は `PutParameter` をスキップし、更新件数とスキップ件数が実行ログで確認できること。併せて、停止時 logs 同期に必要な `awscli` 依存がセットアップ手順へ明記されていること。
 
 ## ステップ横断の考慮事項（開発・着手前チェック）
 

@@ -129,13 +129,15 @@ ssh -i .\<KEY_FILE_NAME>.pem ubuntu@<PUBLIC_IP>
 ```bash
 sudo apt update
 sudo apt -y upgrade
-sudo apt -y install curl wget tar jq unzip
+sudo apt -y install curl wget tar jq unzip awscli
 
 # Factorio 実行ユーザー作成
 sudo useradd -m -s /bin/bash factorio || true
 sudo mkdir -p /opt/factorio
 sudo chown -R factorio:factorio /opt/factorio
 ```
+
+`awscli` は `/stop` 時の `logs` 同期（`aws s3 sync`）で利用します。未導入だと同期ステップが失敗し、停止オーケストレーションが中断されます。
 
 ## 5. Factorio サーバーのインストールと RCON 有効化
 
@@ -227,6 +229,7 @@ sudo systemctl status factorio --no-pager
 - **重要**: save の実体はローカルの `/opt/factorio/saves/*.zip` ではなく、**S3 Files 側の `/mnt/factorio-data/saves/save.zip`** を `--start-server` に指定してください。`SAVE_FILE_KEY` も `.env` / `.env.dev` で **`saves/save.zip`** に揃えます。（`factorio-prod.service` の `--start-server` がローカル `init.zip` のままの場合は、本番運用に合わせて上記パスへ揃えること。）
 - 開発/本番で S3 バケットを分ける設計であれば、サービス側の save パスは同じ `saves/save.zip` でも問題ありません。向き先バケットは、EC2 が `/etc/fstab` でどの `S3_FILES_SYSTEM_ID` をマウントしているかで切り替わります。
 - 推奨運用（2026-04 合意）: `saves` / `mods` / `config` は S3 Files 側を正とし、`logs` は **ローカル `/opt/factorio/logs` に出力して停止時に S3 (`logs/`) へ同期**します。`logs` を常時 S3 Files 直書きにしないことで、実行中のログ追記をローカル I/O で安定化しつつ、停止後の集計（Glue/Athena）用データは S3 に集約できます。
+- `SERVICE_UNIT_NAME` は `.env` / SSM で停止対象ユニットを指定するため、独自構築サーバー（他プロセス同居）では誤設定リスクがあります。適用前に `systemctl status <SERVICE_UNIT_NAME>` で対象ユニットを確認してください（本資料の標準構成である Factorio 専用EC2 では通常リスクは低い）。
 
 ### 5-5. RCON ポート疎通確認
 
