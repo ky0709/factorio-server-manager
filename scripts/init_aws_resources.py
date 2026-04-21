@@ -12,21 +12,14 @@ from dotenv import load_dotenv
 
 def ensure_s3_bucket_layout_prefixes(s3_client, bucket_name):
     """
-    バケット直下に saves/ mods/ config/ logs/ のキーを置く（S3 の「フォルダ」相当）。
-    いずれかが無い場合のみ put_object する（既存バケットへの追実行でも冪等）。
+    S3 バケットレイアウトを初期化する。
+    注意: S3 Files マウント環境では "mods/" のような 0-byte キーが
+    ディレクトリではなく通常ファイルに見える場合があるため、空キーは作成しない。
+    （実データ作成時にプレフィックスは自動的に現れる）
     """
-    layout_keys = ("saves/", "mods/", "config/", "logs/")
-    print(f"📁 Ensuring S3 bucket layout prefixes: {', '.join(layout_keys)}")
-    for key in layout_keys:
-        try:
-            s3_client.head_object(Bucket=bucket_name, Key=key)
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code in ("404", "NoSuchKey", "NotFound"):
-                s3_client.put_object(Bucket=bucket_name, Key=key, Body=b"")
-                print(f"    Created {key}")
-            else:
-                raise
+    layout_prefixes = ("saves/", "mods/", "config/", "logs/")
+    print(f"📁 S3 layout prefixes (no placeholder objects): {', '.join(layout_prefixes)}")
+    print("    Placeholder objects are intentionally skipped for S3 Files compatibility.")
 
 
 def main():

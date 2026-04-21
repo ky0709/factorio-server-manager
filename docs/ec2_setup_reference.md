@@ -198,6 +198,7 @@ sudo tee /etc/systemd/system/factorio.service > /dev/null <<'EOF'
 Description=Factorio Headless Server
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor=/mnt/factorio-data
 
 [Service]
 User=factorio
@@ -206,7 +207,8 @@ EnvironmentFile=/etc/factorio.env
 # Headless はログをカレントディレクトリに factorio-current.log / factorio-previous.log として出力するため、作業ディレクトリを logs に固定する
 WorkingDirectory=/opt/factorio/logs
 ExecStart=/opt/factorio/bin/x64/factorio \
-  --server-settings /opt/factorio/config/server-settings.json \
+  --server-settings /mnt/factorio-data/config/server-settings.json \
+  --mod-directory /mnt/factorio-data/mods \
   --start-server /mnt/factorio-data/saves/save.zip \
   --rcon-port ${RCON_PORT} \
   --rcon-password ${RCON_PASSWORD}
@@ -227,6 +229,9 @@ sudo systemctl status factorio --no-pager
 - `server-settings-prod.json` / `server-settings-dev.json` と、`/etc/factorio.prod.env` / `/etc/factorio.dev.env` を作成します。
 - `factorio-prod.service` / `factorio-dev.service` を分離して、用途に応じて片方だけ起動します（同時起動は非推奨）。AMI を起動オプションで切り替える運用では、**どちらのユニットも** `WorkingDirectory=/opt/factorio/logs` を揃え、`/opt/factorio/logs` を事前に作成しておくとログの場所が環境間で一致します。
 - **重要**: save の実体はローカルの `/opt/factorio/saves/*.zip` ではなく、**S3 Files 側の `/mnt/factorio-data/saves/save.zip`** を `--start-server` に指定してください。`SAVE_FILE_KEY` も `.env` / `.env.dev` で **`saves/save.zip`** に揃えます。（`factorio-prod.service` の `--start-server` がローカル `init.zip` のままの場合は、本番運用に合わせて上記パスへ揃えること。）
+- **重要**: `config` と `mods` も S3 Files 側を正とし、`--server-settings /mnt/factorio-data/config/server-settings.json` と `--mod-directory /mnt/factorio-data/mods` を指定してください。これによりインスタンス再作成後も同一データを継続利用できます。
+- `RequiresMountsFor=/mnt/factorio-data` を設定して、S3 Files がマウントされる前に `factorio.service` が起動しないようにしてください（`/etc/fstab` の設定とセットで適用）。
+- **注意（独自構築サーバー）**: Executor 側の起動時チェックと停止時アンマウントは、現時点では `/mnt/factorio-data` を前提にしています。`ec2_setup_reference.md` を使わず独自構成で構築した場合は、マウント先・`ExecStart`・`/etc/fstab` を本手順の前提に合わせてください。
 - 開発/本番で S3 バケットを分ける設計であれば、サービス側の save パスは同じ `saves/save.zip` でも問題ありません。向き先バケットは、EC2 が `/etc/fstab` でどの `S3_FILES_SYSTEM_ID` をマウントしているかで切り替わります。
 - 推奨運用（2026-04 合意）: `saves` / `mods` / `config` は S3 Files 側を正とし、`logs` は **ローカル `/opt/factorio/logs` に出力して停止時に S3 (`logs/`) へ同期**します。`logs` を常時 S3 Files 直書きにしないことで、実行中のログ追記をローカル I/O で安定化しつつ、停止後の集計（Glue/Athena）用データは S3 に集約できます。
 - `SERVICE_UNIT_NAME` は `.env` / SSM で停止対象ユニットを指定するため、独自構築サーバー（他プロセス同居）では誤設定リスクがあります。適用前に `systemctl status <SERVICE_UNIT_NAME>` で対象ユニットを確認してください（本資料の標準構成である Factorio 専用EC2 では通常リスクは低い）。
@@ -437,10 +442,10 @@ aws s3api list-object-versions --bucket <S3_BUCKET_NAME> --prefix "saves/save.zi
 - ディレクトリの時刻を触らない: `--omit-dir-times`（短形: `-O`）。**ファイル**でも `failed to set times` が出る場合は `-a` をやめ、タイムスタンプ無しで再試行する（例: `-rlDv` に上記オプションを組み合わせる）。
 
 ```bash
-sudo -u factorio mkdir -p /mnt/factorio-data/mods /mnt/factorio-data/config /mnt/factorio-data/logs
+sudo -u factorio mkdir -p /mnt/factorio-data/mods /mnt/factorio-data/config
 
 # 書き込み不可のときは root で所有者を揃えてから rsync（NFS では chgrp は失敗しがちだが chown は通ることが多い）
-sudo chown -R factorio:factorio /mnt/factorio-data/mods /mnt/factorio-data/config /mnt/factorio-data/logs
+sudo chown -R factorio:factorio /mnt/factorio-data/mods /mnt/factorio-data/config
 
 sudo -u factorio rsync -av --no-group --no-owner --omit-dir-times --temp-dir=/tmp \
   /opt/factorio/mods/ /mnt/factorio-data/mods/

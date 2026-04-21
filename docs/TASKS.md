@@ -180,10 +180,10 @@
     ・背景: `/start` `/stop` `/restore` `/pass` の説明に固定値前提や旧挙動の記載が残り、実装との差分で運用判断を誤る恐れがあるため。
     ・完了条件: command_reference と README の主要コマンド説明が現行 Lambda 実装と矛盾しない記載へ更新されていること。
 
-[ ] ID:033 [FEAT] [OPS] mods/config/logs の S3 ディレクトリ統合を実装
+[x] ID:033 [FEAT] [OPS] mods/config/logs の S3 ディレクトリ統合を実装
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, docs/ec2_setup_reference.md, scripts/init_aws_resources.py, .env.example
     ・背景: 現在は `saves/save.zip` の運用は確立している一方、`/mods` `/config` `/logs` は S3 統合が未完了で、完全ステートレス運用が成立していないため。
-    ・設計方針（着手時・バケットキー）: 本番と開発で **S3 バケットを分ける**（バケット名は `.env` の `S3_BUCKET_NAME`、公開ドキュメントではプレースホルダ）。バケット内のオブジェクトキーは **ルート直下**に `saves/`（既存の `SAVE_FILE_KEY=saves/save.zip` と整合）, `logs/`, `mods/`, `config/` を置く。`init_aws_resources.py` はバケット作成または既存確認の直後に、上記4プレフィックスを `saves/` と同様に空キーで確保する（冪等）。運用方針として `saves/mods/config` は S3 Files 側を常時参照し、`logs` はローカル出力（`/opt/factorio/logs`）を正として停止時に S3 へ同期する。初回のローカル→マウント先コピーで `rsync -a` が `chgrp` / `mkstemp` で失敗する場合は **`docs/ec2_setup_reference.md` の 6-6-1**（`--no-group`・`--temp-dir=/tmp` 等）を参照。
+    ・設計方針（着手時・バケットキー）: 本番と開発で **S3 バケットを分ける**（バケット名は `.env` の `S3_BUCKET_NAME`、公開ドキュメントではプレースホルダ）。バケット内のオブジェクトキーは **ルート直下**に `saves/`（既存の `SAVE_FILE_KEY=saves/save.zip` と整合）, `logs/`, `mods/`, `config/` を置く。`init_aws_resources.py` はバケット作成または既存確認時にレイアウト前提を明示し、**S3 Files 互換性のため 0-byte プレースホルダキーは作成しない**。運用方針として `saves/mods/config` は S3 Files 側を常時参照し、`logs` はローカル出力（`/opt/factorio/logs`）を正として停止時に S3 へ同期する。初回のローカル→マウント先コピーで `rsync -a` が `chgrp` / `mkstemp` で失敗する場合は **`docs/ec2_setup_reference.md` の 6-6-1**（`--no-group`・`--temp-dir=/tmp` 等）を参照。
     ・完了条件: 上記キー構成に沿って `saves/mods/config` が S3 側の正として運用され、`logs` は停止時同期で S3 に集約されること。手順・実装・環境変数が追跡可能で、再起動・インスタンス再作成後も同一データを継続利用できること。
 
 [x] ID:034 [FEAT] [OPS] EC2 起動/停止オーケストレーション（save->logs同期->stop）を自動化
@@ -266,6 +266,11 @@
     ・関連箇所: docs/TASKS.md, docs/ec2_setup_reference.md
     ・背景: ID:034 の完了判定に必要なサブタスク依存を `ID:046/047/048` として明文化し、`ID:048` 実測完了（`logs/date=2026-04-20/` 着地確認）を反映してレビュー/マージ判断の境界を固定できたため。
     ・完了条件: ID:046/047/048 の完了を前提とした ID:034 の最終チェックリストが文書化され、完了/未完の境界が明確になっていること。
+
+[ ] ID:050 [TASK] [OPS] S3 Files マウントパスを環境変数で可変化を検討
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, scripts/register.py, .env.example, docs/ec2_setup_reference.md
+    ・背景: 現在の Executor は `/mnt/factorio-data` を固定前提としており、独自構築サーバーでマウント先が異なる場合に起動時チェックや停止時アンマウントで不整合が発生するため。
+    ・完了条件: `FACTORIO_DATA_MOUNT_PATH`（仮称）を `.env` / SSM 経由で参照し、Executor の起動時チェック・停止時アンマウント・関連手順が同一値で運用できること。
 
 ## ステップ横断の考慮事項（開発・着手前チェック）
 

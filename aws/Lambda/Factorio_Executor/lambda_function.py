@@ -220,6 +220,22 @@ def _resolve_service_unit_name():
         return f"sudo systemctl stop {unit}", False
     return "sudo systemctl stop factorio-dev || sudo systemctl stop factorio-prod || sudo systemctl stop factorio", True
 
+
+def _ensure_s3files_runtime_paths(ssm, instance_id):
+    """
+    起動後に S3 Files マウントと必須パスを確認する。
+    ID:033 で saves/mods/config を S3 Files 側に寄せるため、RCON待機前に確認する。
+    """
+    command = (
+        "set -e; "
+        "sudo mkdir -p /mnt/factorio-data /mnt/factorio-data/saves /mnt/factorio-data/mods /mnt/factorio-data/config; "
+        "mountpoint -q /mnt/factorio-data || sudo mount -a; "
+        "mountpoint -q /mnt/factorio-data; "
+        "test -d /mnt/factorio-data/mods; "
+        "test -f /mnt/factorio-data/config/server-settings.json"
+    )
+    return _run_ssm_shell_and_wait(ssm, instance_id, [command], timeout_seconds=45)
+
 def init_config():
     try:
         global _suppressed_logs
@@ -433,6 +449,9 @@ def handle_start(event, ec2, inst, state, ip, locale):
             )
 
             ec2.start_instances(InstanceIds=[config['instance_id']])
+            ssm = get_client('ssm')
+            runtime_paths_ready = False
+            runtime_check_error_logged = False
             
             # 内部仕様: 起動完了までポーリング待機 (Lambdaタイムアウトに注意)
             # RCONが通る＝ゲームプロセス起動完了とみなす
@@ -445,6 +464,21 @@ def handle_start(event, ec2, inst, state, ip, locale):
                 inst_refresh = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
                 current_ip = inst_refresh.get('PublicIpAddress')
                 if current_ip:
+                    if not runtime_paths_ready:
+                        ready_ok, ready_status, ready_out, ready_err = _ensure_s3files_runtime_paths(ssm, config['instance_id'])
+                        if not ready_ok:
+                            print(f"⚠️ Runtime path check failed before RCON. status={ready_status} stderr={ready_err}")
+                            if ready_out:
+                                print(f"⚠️ Runtime path check output: {ready_out}")
+                            if not runtime_check_error_logged:
+                                notify(
+                                    f"⚠️ [LOG] Startup storage check failed. status={ready_status} stderr={ready_err}",
+                                    mode='log'
+                                )
+                                runtime_check_error_logged = True
+                            time.sleep(interval)
+                            continue
+                        runtime_paths_ready = True
                     check = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], "/version")
                     if "Error" not in check:
                         # 3. 起動完了後、RCON経由でゲーム内パスワードを適用
@@ -471,6 +505,17 @@ def handle_start(event, ec2, inst, state, ip, locale):
                         }
                 time.sleep(interval)
 
+            if not runtime_paths_ready:
+                factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
+                notify(
+                    "⚠️ [LOG] Startup aborted due to storage path check failure. Please verify S3 Files mount and config path.",
+                    mode='log'
+                )
+                return (
+                    "⚠️ 起動後のストレージ確認に失敗しました。S3 Files のマウントと /mnt/factorio-data/config/server-settings.json を確認してください。"
+                    if locale == 'ja'
+                    else "⚠️ Startup storage check failed. Please verify S3 Files mount and /mnt/factorio-data/config/server-settings.json."
+                )
             return get_msg("start", "success", locale)
         return get_msg("start", "already", locale)
 
