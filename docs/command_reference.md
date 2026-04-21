@@ -42,6 +42,15 @@
   - 通常は DynamoDB の `ActivePassword` を参照し、起動処理中は「準備中」メッセージ付きで表示します。
   - `ActivePassword` 取得失敗時は `GAME_PASSWORD` 設定値へフォールバックします。
 
+### 🧰 /config (Scaffold)
+- **概要**: 設定管理コマンドの枠組み。現時点では maintenance 応答のみです。
+
+### 🧩 /mods (Scaffold)
+- **概要**: MOD管理コマンドの枠組み。現時点では maintenance 応答のみです。
+
+### 👑 /admin (Scaffold)
+- **概要**: ゲーム内管理者管理コマンドの枠組み。現時点では maintenance 応答のみです。
+
 ---
 
 ## 🔐 権限管理
@@ -50,6 +59,10 @@
 
 - デフォルトの制限対象: `start`, `stop`, `save`, `restore:select`
 - 制限されているコマンドは、Discord上の説明文に自動的に **[管理者限定]** タグが付与されます。
+- `STRICT_ADMIN_USER_COMMAND_STRINGS` は、通常の制限設定とは別に **常に管理者限定** として扱われます（Step 4 の scaffold 用）。
+- `STRICT_ADMIN_USER_COMMAND_STRINGS` はデフォルトで `config,mods,admin` を含みます。
+- 強制管理者限定の判定は **`ADMIN_USER_IDS` の一致のみ** です（`ADMIN_ROLE_IDS` は参照しません）。
+- `RESTRICTED_COMMAND_STRINGS` / `STRICT_ADMIN_USER_COMMAND_STRINGS` / `COMMAND_ROUTING` を変更した場合は、`python scripts/register.py <env>` を再実行して Discord のコマンド説明と SSM 設定へ反映してください。
 
 ---
 

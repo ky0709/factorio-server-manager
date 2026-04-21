@@ -7,7 +7,8 @@
             "Action": [
                 "logs:CreateLogGroup",
                 "logs:CreateLogStream",
-                "logs:PutLogEvents"
+                "logs:PutLogEvents",
+                "logs:FilterLogEvents"
             ],
             "Resource": "arn:aws:logs:<REGION>:<ACCOUNT_ID>:*"
         },
@@ -70,6 +71,7 @@
             "Sid": "AllowDynamoDBStateAccess",
             "Effect": "Allow",
             "Action": [
+                "dynamodb:PutItem",
                 "dynamodb:GetItem",
                 "dynamodb:UpdateItem",
                 "dynamodb:DeleteItem"

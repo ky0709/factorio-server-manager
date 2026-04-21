@@ -7,6 +7,8 @@ import re
 from datetime import datetime
 import time
 import argparse
+import tempfile
+from pathlib import Path
 
 # プロジェクトルートの.envを読み込み
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,11 +28,32 @@ parser.add_argument(
     default="",
     help="Comma-separated categories to run (notifier,executor,worker,lifecycle,restore,final)"
 )
+parser.add_argument(
+    "--yes",
+    action="store_true",
+    help="Skip interactive confirmation prompt"
+)
 args = parser.parse_args()
 
 env_arg = args.env
 env_file = ".env" if env_arg == "prod" else f".env.{env_arg}"
 env_path = os.path.join(BASE_DIR, env_file)
+
+
+def setup_stdio_encoding():
+    """
+    Windows の cp932 環境でも絵文字ログ出力で停止しないよう、標準出力をUTF-8へ再設定する。
+    """
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+setup_stdio_encoding()
 
 if os.path.exists(env_path):
     print(f"📖 Loading environment: {env_file}")
@@ -60,6 +83,7 @@ TEST_CATEGORY_CATALOG = {
     14: {"worker"},
     15: {"worker", "lifecycle"},
     16: {"worker", "restore"},
+    17: {"executor", "lifecycle"},
 }
 
 
@@ -76,6 +100,46 @@ if args.tests:
             print(f"⚠️ Ignoring invalid test number: {raw}")
 
 SELECTED_CATEGORIES = parse_csv_set(args.categories)
+LOCK_FILE_PATH = Path(tempfile.gettempdir()) / f"factorio_test_runner_{env_arg}.lock"
+
+
+def acquire_runner_lock():
+    now = time.time()
+    stale_seconds = 4 * 60 * 60
+    if LOCK_FILE_PATH.exists():
+        try:
+            meta = json.loads(LOCK_FILE_PATH.read_text(encoding='utf-8'))
+        except Exception:
+            meta = {}
+        started_at = float(meta.get("started_at", 0) or 0)
+        pid = meta.get("pid", "unknown")
+        age = int(now - started_at) if started_at else None
+        if started_at and age is not None and age > stale_seconds:
+            print(f"⚠️ Stale lock detected (pid={pid}, age={age}s). Replacing lock.")
+        else:
+            detail = f"pid={pid}" if age is None else f"pid={pid}, age={age}s"
+            print(f"❌ Another test_runner appears to be running ({detail}).")
+            print(f"   Remove lock manually if this is incorrect: {LOCK_FILE_PATH}")
+            return False
+
+    LOCK_FILE_PATH.write_text(
+        json.dumps({
+            "pid": os.getpid(),
+            "started_at": now,
+            "env": env_arg,
+            "args": sys.argv,
+        }, ensure_ascii=False),
+        encoding='utf-8'
+    )
+    return True
+
+
+def release_runner_lock():
+    try:
+        if LOCK_FILE_PATH.exists():
+            LOCK_FILE_PATH.unlink()
+    except Exception as e:
+        print(f"⚠️ Failed to remove lock file: {e}")
 
 
 def should_run_test(test_no):
@@ -111,6 +175,26 @@ def query_save_state_from_executor(quiet=False):
         quiet=quiet,
     )
 
+
+def query_start_lock_state(quiet=True):
+    return invoke_lambda(
+        os.getenv('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'),
+        {"action": "integration_query_start_lock", "test_mode": True},
+        quiet=quiet,
+    )
+
+
+def wait_until_start_lock_released(timeout_seconds=210):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        state = query_start_lock_state(quiet=True)
+        if not state or not state.get('ok'):
+            return False, state
+        if not state.get('locked'):
+            return True, state
+        time.sleep(5)
+    return False, {"ok": True, "locked": True, "error": "timeout"}
+
 def wait_for_ec2_state(instance_id, state):
     print(f"⏳ Waiting for instance {instance_id} to reach state: {state}...")
     if state == 'stopped':
@@ -128,6 +212,75 @@ def wait_for_ec2_state(instance_id, state):
             print(f"🔕 [SILENT MODE] Suppressed Notification: 🔌 [LOG] EC2 Instance ({instance_id}) has stopped. Shutdown sequence completed.")
         elif state == 'running':
             print(f"🔕 [SILENT MODE] Suppressed Notification: 🚀 [LOG] EC2 Instance ({instance_id}) is now running.")
+
+
+def cleanup_stop_and_wait(label, lock_wait_seconds=210):
+    retry_stop = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), {"action": "stop"})
+    if not retry_stop or retry_stop.get('errorMessage'):
+        print(f"  ❌ {label} cleanup stop failed before retry.")
+        return False
+    try:
+        wait_for_ec2_state(os.getenv('INSTANCE_ID'), 'stopped')
+    except Exception as e:
+        print(f"  ❌ {label} cleanup stop wait failed: {e}")
+        return False
+
+    lock_released, lock_state = wait_until_start_lock_released(timeout_seconds=lock_wait_seconds)
+    if not lock_released:
+        print(f"  ❌ {label} cleanup completed, but StartActionLock remained: {lock_state}")
+        return False
+    print(f"  ✅ {label} cleanup stop completed. Retrying start test.")
+    return True
+
+
+def has_mount_check_failure_logs(result):
+    logs = result.get("suppressed_logs") if isinstance(result, dict) else None
+    if not isinstance(logs, list):
+        return False
+    joined = "\n".join(str(entry) for entry in logs)
+    return (
+        "Startup storage check failed" in joined
+        or "Startup aborted due to storage path check failure" in joined
+        or "ストレージ確認に失敗" in joined
+    )
+
+
+def detect_mount_failure_via_executor(lookback_seconds=240):
+    payload = {
+        "action": "integration_detect_startup_failure",
+        "test_mode": True,
+        "data": {"lookback_seconds": lookback_seconds},
+    }
+    res = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'), payload, quiet=True)
+    if not res:
+        return False
+    if not res.get("ok"):
+        print(f"  ⚠️ Executor-side mount failure detection failed: {res.get('error')}")
+        return False
+    if res.get("detected"):
+        print("  ℹ️ Detected startup storage failure via executor log probe.")
+        return True
+    return False
+
+
+def probe_mount_failure_after_delay(delay_seconds=20):
+    """
+    起動直後は suppressed_logs が空のことがあるため、少し待ってから再取得する。
+    """
+    print(f"  ℹ️ Waiting {delay_seconds}s for delayed startup failure logs...")
+    time.sleep(delay_seconds)
+    probe_payload = {
+        "action": "start",
+        "application_id": os.getenv('APP_ID'),
+        "token": "dummy_token_for_start_test_probe",
+        "test_mode": True,
+    }
+    probe_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'), probe_payload, quiet=True)
+    if has_mount_check_failure_logs(probe_result or {}):
+        print("  ℹ️ Detected startup storage failure from delayed probe logs.")
+        return True
+    return False
+
 
 def get_latest_save_version():
     """Executor 経由で S3 上の現在のセーブ最新バージョン相当を返す。"""
@@ -152,12 +305,17 @@ def wait_for_new_save_version(previous_version_id, timeout_seconds=180, label="s
 
 def restore_save_test_state(created_version_ids, baseline_latest_version, baseline_save_info):
     """テストで作成した S3 バージョンとカタログ情報をテスト前状態へ戻す（Executor Lambda 経由。Regist に削除権限を要しない）。"""
+    baseline_version_id = baseline_latest_version.get('VersionId') if baseline_latest_version else None
+    if not created_version_ids and not baseline_version_id and not baseline_save_info:
+        print("ℹ️ Save state restore skipped: no baseline and no created versions.")
+        return True
+
     payload = {
         "action": "integration_restore_save_state",
         "test_mode": True,
         "data": {
             "delete_version_ids": created_version_ids,
-            "baseline_version_id": baseline_latest_version.get('VersionId') if baseline_latest_version else None,
+            "baseline_version_id": baseline_version_id,
             "baseline_save_info": baseline_save_info,
         },
     }
@@ -166,6 +324,11 @@ def restore_save_test_state(created_version_ids, baseline_latest_version, baseli
         print("⚠️ integration_restore_save_state: no response")
         return False
     if res.get('ok'):
+        return True
+    errors = res.get('errors')
+    if isinstance(errors, list) and not errors:
+        # Lambda 側で no-op を ok:false + [] で返すケースを許容する
+        print("ℹ️ integration_restore_save_state returned no-op result; treated as success.")
         return True
     err = res.get('errors') or res.get('error')
     print(f"⚠️ integration_restore_save_state failed: {err}")
@@ -179,6 +342,7 @@ def run_flow_test():
     baseline_latest_version = None
     baseline_save_info = None
     save_state_verification_enabled = False
+    started_in_test4 = False
 
     snap = query_save_state_from_executor()
     if snap and snap.get('ok'):
@@ -188,6 +352,22 @@ def run_flow_test():
     else:
         verify_skip_reason = (snap.get('error') if snap else None) or 'integration_query_save_state failed'
         print(f"⚠️ Save state verification skipped: {verify_skip_reason}")
+
+    clear_lock_res = invoke_lambda(
+        os.getenv('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'),
+        {"action": "integration_clear_start_lock", "test_mode": True},
+        quiet=True,
+    )
+    if clear_lock_res and clear_lock_res.get('ok'):
+        print("ℹ️ Cleared stale StartActionLock before tests.")
+    else:
+        print("⚠️ Could not clear StartActionLock before tests (continuing).")
+
+    lock_ready, lock_state = wait_until_start_lock_released()
+    if lock_ready:
+        print("ℹ️ StartActionLock is clear.")
+    else:
+        print(f"⚠️ StartActionLock is still held before tests: {lock_state}")
 
     # サイレントモード時はグローバルなテストフラグをDBにセット
     if args.silent:
@@ -266,35 +446,146 @@ def run_flow_test():
         # 4. Executor 単体テスト (Start Embed確認)
         if should_run_test(4):
             print("\n[Test 4] Executor Start Embed Check")
-            # Note: This requires the server to be stopped for the start action to proceed.
-            # Mocking EC2 state and RCON is complex for this runner.
-            # This test primarily checks the structure of the embed if it were to be sent.
-            start_payload = {
-                "action": "start",
-                "application_id": os.getenv('APP_ID'),
-                "token": "dummy_token_for_start_test",
-                "test_mode": True # Enable test mode to get message content
-            }
-            start_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'), start_payload)
-            if start_result:
+            max_start_attempts = 3
+            start_success = False
+            start_failure_recorded = False
+            used_cleanup_retry = False
+            state_mismatch_observed = False
+
+            for attempt in range(1, max_start_attempts + 1):
+                pre_state = None
+                try:
+                    pre_inst = ec2_client.describe_instances(InstanceIds=[os.getenv('INSTANCE_ID')])['Reservations'][0]['Instances'][0]
+                    pre_state = pre_inst['State']['Name']
+                    print(f"  ℹ️ Pre-start EC2 state (attempt {attempt}/{max_start_attempts}): {pre_state}")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to check pre-start EC2 state: {e}")
+
+                if pre_state and pre_state != 'stopped':
+                    if pre_state == 'running' and attempt < max_start_attempts and not used_cleanup_retry:
+                        print("  ⚠️ Precondition is running. Attempting one cleanup stop and retry...")
+                        used_cleanup_retry = True
+                        if cleanup_stop_and_wait("Precondition"):
+                            continue
+                    test_results.append({"name": "Executor Start (Precondition)", "ok": False})
+                    print(f"  ❌ Start precondition failed: instance state is '{pre_state}', expected 'stopped'.")
+                    start_failure_recorded = True
+                    break
+
+                start_payload = {
+                    "action": "start",
+                    "application_id": os.getenv('APP_ID'),
+                    "token": "dummy_token_for_start_test",
+                    "test_mode": True
+                }
+                start_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME', 'Factorio_Executor'), start_payload)
+                if not start_result:
+                    print("  ❌ Start check failed: No response.")
+                    test_results.append({"name": "Executor Start", "ok": False})
+                    start_failure_recorded = True
+                    break
+
+                executor_debug_state = start_result.get('debug_state')
+                executor_debug_instance_id = start_result.get('debug_instance_id')
+                start_lock_denied = bool(start_result.get('debug_start_lock_denied'))
+                if executor_debug_state is not None:
+                    print(
+                        f"  ℹ️ Executor debug state: {executor_debug_state} "
+                        f"(instance: {executor_debug_instance_id or 'unknown'})"
+                    )
+                if start_lock_denied:
+                    print("  ℹ️ Executor start lock is currently held by another invocation.")
+                if pre_state and executor_debug_state and pre_state != executor_debug_state:
+                    state_mismatch_observed = True
+                    print(
+                        f"  ⚠️ State mismatch: runner pre_state='{pre_state}' "
+                        f"but executor debug_state='{executor_debug_state}'."
+                    )
+
                 if start_result.get('embeds'):
                     embed = start_result['embeds'][0]
                     print(f"  - Start embed title: {embed.get('title')}")
                     print(f"  - Start embed description: {embed.get('description')}")
                     assert "Factorio サーバー起動完了" in embed.get('title') or "Factorio Server Ready" in embed.get('title')
                     assert "接続先" in embed.get('description') or "Address" in embed.get('description')
+                    started_in_test4 = True
                     test_results.append({"name": "Executor Start (Embed)", "ok": True})
                     print("  ✅ Start embed check passed (Server was stopped).")
-                elif start_result.get('content'):
+                    start_success = True
+                    break
+
+                if start_result.get('content'):
                     print(f"  - Start result: {start_result['content']}")
-                    assert "既に起動" in start_result['content'] or "already running" in start_result['content']
-                    test_results.append({"name": "Executor Start (Skip)", "ok": True})
-                    print("  ✅ Start check passed (Server already running).")
-                else:
+                    content = start_result['content']
+                    mount_check_failed = (
+                        "ストレージ確認に失敗" in content
+                        or "Startup storage check failed" in content
+                    )
+                    if not mount_check_failed and has_mount_check_failure_logs(start_result):
+                        mount_check_failed = True
+                        print("  ℹ️ Detected startup storage failure in suppressed logs.")
+                    if mount_check_failed:
+                        test_results.append({"name": "Executor Start (Mount Check)", "ok": False})
+                        print("  ❌ Start check failed: Startup storage/mount check failed.")
+                        start_failure_recorded = True
+                        break
+
+                    is_already_running = "既に起動" in content or "already running" in content
+                    if start_lock_denied and attempt < max_start_attempts:
+                        print("  ⚠️ Start lock contention detected. Waiting and retrying...")
+                        lock_released, lock_state = wait_until_start_lock_released(timeout_seconds=90)
+                        if not lock_released:
+                            print(f"  ❌ Start lock contention did not clear in time: {lock_state}")
+                            test_results.append({"name": "Executor Start (Lock Contention)", "ok": False})
+                            start_failure_recorded = True
+                            break
+                        continue
+                    if is_already_running and attempt < max_start_attempts and not used_cleanup_retry:
+                        print("  ⚠️ Start reported already running/preparing. Attempting one cleanup stop and retry...")
+                        used_cleanup_retry = True
+                        if cleanup_stop_and_wait("Retry"):
+                            continue
+                        if state_mismatch_observed:
+                            test_results.append({"name": "Executor Start (State Mismatch)", "ok": False})
+                        else:
+                            test_results.append({"name": "Executor Start (Unexpected Running)", "ok": False})
+                        start_failure_recorded = True
+                        break
+
+                    if is_already_running:
+                        if state_mismatch_observed:
+                            if probe_mount_failure_after_delay():
+                                test_results.append({"name": "Executor Start (Mount Check)", "ok": False})
+                                print("  ❌ Start check failed: Startup storage/mount check failed (delayed log detection).")
+                                start_failure_recorded = True
+                                break
+                            if detect_mount_failure_via_executor():
+                                test_results.append({"name": "Executor Start (Mount Check)", "ok": False})
+                                print("  ❌ Start check failed: Startup storage/mount check failed (executor-side log probe).")
+                                start_failure_recorded = True
+                                break
+                        if state_mismatch_observed:
+                            test_results.append({"name": "Executor Start (State Mismatch)", "ok": False})
+                            print("  ❌ Start check failed: pre_state and executor debug_state mismatch detected.")
+                        else:
+                            test_results.append({"name": "Executor Start (Unexpected Running)", "ok": False})
+                            print("  ❌ Start check failed: expected stopped precondition, but executor reported already running/preparing.")
+                        start_failure_recorded = True
+                        break
+
                     test_results.append({"name": "Executor Start", "ok": False})
-                    print("  ❌ Start check failed: Unexpected response format.")
-            else:
-                print("  ❌ Start check failed: No response.")
+                    print("  ❌ Start check failed: Unexpected start response content.")
+                    start_failure_recorded = True
+                    break
+
+                test_results.append({"name": "Executor Start", "ok": False})
+                print("  ❌ Start check failed: Unexpected response format.")
+                start_failure_recorded = True
+                break
+
+            if not start_success and not start_failure_recorded:
+                test_results.append({"name": "Executor Start", "ok": False})
+                print("  ❌ Start check failed: test did not reach a terminal outcome.")
         else:
             print("\n[Skip 4] Executor Start Embed Check")
 
@@ -565,6 +856,35 @@ def run_flow_test():
 
     finally:
         # 何が起きてもテストフラグは削除を試みる
+        if not should_run_test(6):
+            try:
+                final_inst = ec2_client.describe_instances(InstanceIds=[os.getenv('INSTANCE_ID')])['Reservations'][0]['Instances'][0]
+                final_state = final_inst['State']['Name']
+            except Exception as e:
+                print(f"\n⚠️ [Auto Cleanup] Failed to inspect final EC2 state: {e}")
+                final_state = None
+
+            if final_state == 'running':
+                cleanup_label = "Test 4" if started_in_test4 else "final state"
+                print(f"\n[Auto Cleanup] Stop server because {cleanup_label} is still running")
+                cleanup_stop_payload = {"action": "stop"}
+                cleanup_stop_result = invoke_lambda(os.getenv('EXECUTOR_LAMBDA_NAME'), cleanup_stop_payload)
+                cleanup_stop_has_error = bool(cleanup_stop_result and cleanup_stop_result.get('errorMessage'))
+                if cleanup_stop_result and not cleanup_stop_has_error:
+                    try:
+                        wait_for_ec2_state(os.getenv('INSTANCE_ID'), 'stopped')
+                        test_results.append({"name": "Executor Stop (Auto Cleanup)", "ok": True})
+                        print("  ✅ Auto cleanup stop completed.")
+                    except Exception as e:
+                        print(f"  ❌ Auto cleanup stop wait failed: {e}")
+                        test_results.append({"name": "Executor Stop (Auto Cleanup)", "ok": False})
+                else:
+                    if cleanup_stop_has_error:
+                        print(f"  ❌ Auto cleanup stop failed: {cleanup_stop_result.get('errorMessage')}")
+                    else:
+                        print("  ❌ Auto cleanup stop failed: no response.")
+                    test_results.append({"name": "Executor Stop (Auto Cleanup)", "ok": False})
+
         if args.silent:
             print("\n🧹 Cleaning up global test session flag...")
             factorio_state_table.delete_item(Key={'ConfigKey': 'TestSessionActive'})
@@ -608,26 +928,32 @@ def run_flow_test():
         sys.exit(1)
 
 if __name__ == "__main__":
+    if not acquire_runner_lock():
+        sys.exit(1)
     # .envに必要な情報があるか確認
-    required_env = ['APP_ID', 'AWS_REGION']
-    missing = [env for env in required_env if not os.getenv(env)]
-    
-    if missing:
-        print(f"❌ Missing .env variables: {', '.join(missing)}")
-    else:
-        # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
-        if os.getenv('AUTO_CONFIRM') != '1':
-            confirm = input(f"Proceed with Integration Test for '{env_file if env_arg else '.env (PROD)'}'? (y/N): ")
-            if confirm.lower() != 'y':
-                print("🛑 Operation cancelled.")
-                sys.exit(1)
-
-            # 本番環境の場合のみ、さらなる確認を求める
-            if env_arg == "prod":
-                print("\n🚨 ATTENTION: You are about to run tests against the PRODUCTION environment.")
-                prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
-                if prod_confirm != 'DEPLOY-PROD':
-                    print("🛑 Production test aborted.")
+    try:
+        required_env = ['APP_ID', 'AWS_REGION']
+        missing = [env for env in required_env if not os.getenv(env)]
+        
+        if missing:
+            print(f"❌ Missing .env variables: {', '.join(missing)}")
+        else:
+            # 実行確認 (AUTO_CONFIRM が '1' の場合はスキップ)
+            auto_confirm = os.getenv('AUTO_CONFIRM', '').strip().lower() in {"1", "true", "yes", "y"}
+            if not (auto_confirm or args.yes):
+                confirm = input(f"Proceed with Integration Test for '{env_file if env_arg else '.env (PROD)'}'? (y/N): ")
+                if confirm.lower() != 'y':
+                    print("🛑 Operation cancelled.")
                     sys.exit(1)
 
-        run_flow_test()
+                # 本番環境の場合のみ、さらなる確認を求める
+                if env_arg == "prod":
+                    print("\n🚨 ATTENTION: You are about to run tests against the PRODUCTION environment.")
+                    prod_confirm = input("To proceed, please type 'DEPLOY-PROD': ")
+                    if prod_confirm != 'DEPLOY-PROD':
+                        print("🛑 Production test aborted.")
+                        sys.exit(1)
+
+            run_flow_test()
+    finally:
+        release_runner_lock()

@@ -1,6 +1,7 @@
 import os
 import requests
 import boto3
+import json
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
 from dotenv import load_dotenv
 import sys
@@ -55,6 +56,9 @@ PARAMETERS_TO_SYNC = {
     'ADMIN_USER_IDS': f'{SSM_BASE}ADMIN_USER_IDS',
     'ADMIN_ROLE_IDS': f'{SSM_BASE}ADMIN_ROLE_IDS',
     'RESTRICTED_COMMAND_STRINGS': f'{SSM_BASE}RESTRICTED_COMMAND_STRINGS',
+    'STRICT_ADMIN_USER_COMMAND_STRINGS': f'{SSM_BASE}STRICT_ADMIN_USER_COMMAND_STRINGS',
+    # backward compatibility for existing environments
+    'STRICT_ADMIN_COMMAND_STRINGS': f'{SSM_BASE}STRICT_ADMIN_COMMAND_STRINGS',
     'DISCORD_PUBLIC_KEY': f'{SSM_BASE}DISCORD_PUBLIC_KEY',
     'EXECUTOR_LAMBDA_NAME': f'{SSM_BASE}EXECUTOR_LAMBDA_NAME',
     'NOTIFIER_LAMBDA_NAME': f'{SSM_BASE}NOTIFIER_LAMBDA_NAME',
@@ -62,6 +66,7 @@ PARAMETERS_TO_SYNC = {
     'AWS_REGION': f'{SSM_BASE}REGION',
     'INSTANCE_ID': f'{SSM_BASE}INSTANCE_ID',
     'SERVICE_UNIT_NAME': f'{SSM_BASE}SERVICE_UNIT_NAME',
+    'SERVER_SETTINGS_FILE_NAME': f'{SSM_BASE}SERVER_SETTINGS_FILE_NAME',
     'EPHEMERAL_COMMAND_STRINGS': f'{SSM_BASE}EPHEMERAL_COMMAND_STRINGS',
     'DYNAMODB_TABLE_NAME': f'{SSM_BASE}DYNAMODB_TABLE_NAME',
     'S3_BUCKET_NAME': f'{SSM_BASE}S3_BUCKET_NAME',
@@ -96,6 +101,14 @@ def register_commands():
     # .env から制限対象コマンドのリストを取得
     restricted_raw = os.getenv('RESTRICTED_COMMAND_STRINGS', '')
     restricted_set = {s.strip() for s in restricted_raw.split(',') if s.strip()}
+    strict_user_raw = os.getenv('STRICT_ADMIN_USER_COMMAND_STRINGS', '')
+    strict_user_set = {s.strip() for s in strict_user_raw.split(',') if s.strip()}
+    routing_raw = os.getenv('COMMAND_ROUTING', '{}')
+    try:
+        command_routing = json.loads(routing_raw)
+    except Exception:
+        print("⚠️ COMMAND_ROUTING parse failed. Maintenance annotation will be skipped.")
+        command_routing = {}
 
     commands = [
     {
@@ -195,6 +208,27 @@ def register_commands():
                 ]
             }
         ]
+    },
+    {
+        "name": "config",
+        "description": "Manage server settings",
+        "description_localizations": {
+            "ja": "サーバー設定を管理します"
+        }
+    },
+    {
+        "name": "mods",
+        "description": "Manage mods",
+        "description_localizations": {
+            "ja": "MODを管理します"
+        }
+    },
+    {
+        "name": "admin",
+        "description": "Manage in-game admins",
+        "description_localizations": {
+            "ja": "ゲーム内管理者を管理します"
+        }
     }
 ]
 
@@ -206,6 +240,17 @@ def register_commands():
             if 'description_localizations' in cmd and 'ja' in cmd['description_localizations']:
                 cmd['description_localizations']['ja'] = f"[管理者限定] {cmd['description_localizations']['ja']}"
 
+        # STRICT は「ADMIN_USER_IDS 一致のみ」で実行可能なコマンドとして明示する
+        if cmd['name'] in strict_user_set:
+            cmd['description'] = f"[User-ID Admin Only] {cmd['description']}"
+            if 'description_localizations' in cmd and 'ja' in cmd['description_localizations']:
+                cmd['description_localizations']['ja'] = f"[管理者ユーザー限定] {cmd['description_localizations']['ja']}"
+
+        if command_routing.get(cmd['name']) == "maintenance":
+            cmd['description'] = f"{cmd['description']} (Maintenance)"
+            if 'description_localizations' in cmd and 'ja' in cmd['description_localizations']:
+                cmd['description_localizations']['ja'] = f"{cmd['description_localizations']['ja']}（メンテナンス中）"
+
         # サブコマンドのチェック (例: restore:select)
         if 'options' in cmd:
             for opt in cmd['options']:
@@ -216,6 +261,16 @@ def register_commands():
                         opt['description'] = f"[Restricted] {opt['description']}"
                         if 'description_localizations' in opt and 'ja' in opt['description_localizations']:
                             opt['description_localizations']['ja'] = f"[管理者限定] {opt['description_localizations']['ja']}"
+
+                    if full_path in strict_user_set:
+                        opt['description'] = f"[User-ID Admin Only] {opt['description']}"
+                        if 'description_localizations' in opt and 'ja' in opt['description_localizations']:
+                            opt['description_localizations']['ja'] = f"[管理者ユーザー限定] {opt['description_localizations']['ja']}"
+
+                    if command_routing.get(full_path) == "maintenance":
+                        opt['description'] = f"{opt['description']} (Maintenance)"
+                        if 'description_localizations' in opt and 'ja' in opt['description_localizations']:
+                            opt['description_localizations']['ja'] = f"{opt['description_localizations']['ja']}（メンテナンス中）"
 
 
     headers = {

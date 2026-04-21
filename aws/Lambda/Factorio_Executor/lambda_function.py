@@ -6,6 +6,7 @@ import secrets
 import string
 from datetime import datetime
 from decimal import Decimal
+from botocore.exceptions import ClientError
 
 # レイヤーからのインポート
 from factorio_common.utils import JST, get_client, fetch_config_from_ssm, run_rcon_command, format_msg, notify_via_lambda
@@ -135,6 +136,46 @@ def handle_integration_restore_save_state(event):
     return {"ok": restored, "errors": errors}
 
 
+def handle_integration_detect_startup_failure(event):
+    """
+    scripts/test_runner 用:
+    直近ログから起動後ストレージ確認失敗を検出する。
+    """
+    try:
+        lookback_seconds = int((event.get('data') or {}).get('lookback_seconds', 240))
+    except Exception:
+        lookback_seconds = 240
+
+    function_name = os.getenv('AWS_LAMBDA_FUNCTION_NAME') or config.get('executor_lambda_name') or 'Factorio_Executor'
+    log_group_name = f"/aws/lambda/{function_name}"
+    start_ms = int((time.time() - max(30, lookback_seconds)) * 1000)
+
+    try:
+        logs = get_client('logs')
+        resp = logs.filter_log_events(
+            logGroupName=log_group_name,
+            startTime=start_ms,
+            interleaved=True
+        )
+        hit_messages = []
+        for ev in resp.get('events', []):
+            msg = ev.get('message', '')
+            if (
+                "Startup storage check failed" in msg
+                or "Startup aborted due to storage path check failure" in msg
+                or "ストレージ確認に失敗" in msg
+            ):
+                hit_messages.append(msg)
+        return {
+            "ok": True,
+            "detected": bool(hit_messages),
+            "messages": hit_messages[-10:]
+        }
+    except Exception as e:
+        print(f"⚠️ integration_detect_startup_failure failed: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 def update_latest_save_info(timestamp_iso):
     """最新セーブの時刻とサイズをカタログへ保存する。"""
     expr_names = {'#ts': 'Timestamp'}
@@ -221,18 +262,127 @@ def _resolve_service_unit_name():
     return "sudo systemctl stop factorio-dev || sudo systemctl stop factorio-prod || sudo systemctl stop factorio", True
 
 
+def _resolve_server_settings_path():
+    """
+    起動前チェックで参照する server-settings ファイルパスを解決する。
+    優先: SERVER_SETTINGS_FILE_NAME（SSM経由: server_settings_file_name）
+    既定: /mnt/factorio-data/config/server-settings.json
+    """
+    file_name = (config.get('server_settings_file_name') or 'server-settings.json').strip()
+    if not file_name:
+        file_name = 'server-settings.json'
+    return f"/mnt/factorio-data/config/{file_name}"
+
+
+def _consume_event_marker(marker_key):
+    """
+    EventBridge の重複配信対策:
+    マーカーを条件付きで削除し、先着 1 実行だけ通知を許可する。
+    """
+    res = factorio_state_table.get_item(Key={'ConfigKey': marker_key})
+    start_time_str = res.get('Item', {}).get('Timestamp')
+    try:
+        factorio_state_table.delete_item(
+            Key={'ConfigKey': marker_key},
+            ConditionExpression="attribute_exists(ConfigKey)"
+        )
+        return True, start_time_str
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code == 'ConditionalCheckFailedException':
+            return False, start_time_str
+        raise
+
+
+def _acquire_start_lock(ttl_seconds=240):
+    """
+    /start 同時実行ガード。
+    - 先着のみロック取得
+    - 異常終了時は ExpiresAt で自然回復
+    """
+    if not factorio_state_table:
+        return True, None
+
+    lock_key = 'StartActionLock'
+    now = int(time.time())
+    token = secrets.token_hex(8)
+    expires_at = now + ttl_seconds
+    try:
+        factorio_state_table.put_item(
+            Item={
+                'ConfigKey': lock_key,
+                'LockToken': token,
+                'Timestamp': str(now),
+                'ExpiresAt': expires_at,
+            },
+            ConditionExpression="attribute_not_exists(ConfigKey) OR ExpiresAt < :now",
+            ExpressionAttributeValues={':now': now},
+        )
+        return True, token
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code == 'ConditionalCheckFailedException':
+            return False, None
+        raise
+
+
+def _release_start_lock(token):
+    if not factorio_state_table or not token:
+        return
+    try:
+        factorio_state_table.delete_item(
+            Key={'ConfigKey': 'StartActionLock'},
+            ConditionExpression="LockToken = :token",
+            ExpressionAttributeValues={':token': token},
+        )
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code != 'ConditionalCheckFailedException':
+            print(f"⚠️ Failed to release StartActionLock: {e}")
+
+
+def _force_release_start_lock():
+    if not factorio_state_table:
+        return {"ok": False, "error": "DynamoDB not initialized"}
+    try:
+        factorio_state_table.delete_item(Key={'ConfigKey': 'StartActionLock'})
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _query_start_lock_state():
+    if not factorio_state_table:
+        return {"ok": False, "error": "DynamoDB not initialized"}
+    try:
+        res = factorio_state_table.get_item(Key={'ConfigKey': 'StartActionLock'})
+        item = res.get('Item')
+        if not item:
+            return {"ok": True, "locked": False}
+        return {
+            "ok": True,
+            "locked": True,
+            "lock_token": item.get('LockToken'),
+            "expires_at": item.get('ExpiresAt'),
+            "timestamp": item.get('Timestamp'),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _ensure_s3files_runtime_paths(ssm, instance_id):
     """
     起動後に S3 Files マウントと必須パスを確認する。
     ID:033 で saves/mods/config を S3 Files 側に寄せるため、RCON待機前に確認する。
     """
+    server_settings_path = _resolve_server_settings_path()
     command = (
         "set -e; "
         "sudo mkdir -p /mnt/factorio-data /mnt/factorio-data/saves /mnt/factorio-data/mods /mnt/factorio-data/config; "
         "mountpoint -q /mnt/factorio-data || sudo mount -a; "
         "mountpoint -q /mnt/factorio-data; "
         "test -d /mnt/factorio-data/mods; "
-        "test -f /mnt/factorio-data/config/server-settings.json"
+        f"test -f {server_settings_path}"
     )
     return _run_ssm_shell_and_wait(ssm, instance_id, [command], timeout_seconds=45)
 
@@ -397,127 +547,148 @@ def handle_status(event, ec2, inst, state, ip, locale):
 
 def handle_start(event, ec2, inst, state, ip, locale):
         # TODO ID:006: SERVER_RUN_MODE=STATIC/DYNAMICで起動方式を分岐し、DYNAMIC時は起動テンプレート(run_instances)で作成したInstanceIdをセッション管理へ保存する
-        if state == 'stopped':
-            # 1. パスワードの取得または生成
-            # SSMにあるのは「設定（固定か空か）」、DynamoDBに保存するのが「現在のセッション用」と分離します
-            new_pwd = (config.get('game_password') or "").strip("'\" ")
+        if config.get("test_mode"):
+            _force_release_start_lock()
+        start_lock_acquired, start_lock_token = _acquire_start_lock()
+        if not start_lock_acquired:
+            print("ℹ️ /start skipped: StartActionLock is already held.")
+            config["start_lock_denied"] = True
+            return get_msg("start", "already", locale)
 
-            if not new_pwd or "your_in_game" in new_pwd:
-                # 設定が空の場合はランダム生成
-                chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-                new_pwd = ''.join(secrets.choice(chars) for _ in range(12))
-            
-            # 2. 現在のパスワードを DynamoDB に「セッションパスワード」として保存
-            # これにより SSM を汚さず、起動のたびに new_pwd が生成される条件(空)を維持できる
-            try:
+        try:
+            if state == 'stopped':
+                # 1. パスワードの取得または生成
+                # SSMにあるのは「設定（固定か空か）」、DynamoDBに保存するのが「現在のセッション用」と分離します
+                new_pwd = (config.get('game_password') or "").strip("'\" ")
+
+                if not new_pwd or "your_in_game" in new_pwd:
+                    # 設定が空の場合はランダム生成
+                    chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+                    new_pwd = ''.join(secrets.choice(chars) for _ in range(12))
+                
+                # 2. 現在のパスワードを DynamoDB に「セッションパスワード」として保存
+                # これにより SSM を汚さず、起動のたびに new_pwd が生成される条件(空)を維持できる
+                try:
+                    factorio_state_table.update_item(
+                        Key={'ConfigKey': 'ActivePassword'},
+                        UpdateExpression="set #val = :v",
+                        ExpressionAttributeNames={'#val': 'Value'},
+                        ExpressionAttributeValues={':v': new_pwd}
+                    )
+                except Exception as e:
+                    print(f"⚠️ Failed to cache active password to DynamoDB: {e}")
+
+                start_process_time = time.time()
+                # 以前の停止処理マーカーが残っている可能性があるため強制削除
+                factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
+
+                # 各種カウントをリセット
+                try:
+                    factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                    factorio_state_table.update_item(Key={'ConfigKey': 'OfflineCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                    factorio_state_table.update_item(Key={'ConfigKey': 'AutoRestartCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                    print("ℹ️ Counters reset for new session.")
+                except Exception as e:
+                    print(f"⚠️ Failed to reset counters: {e}")
+
+                # 無人停止カウントおよびRCON無応答カウントをリセット
+                try:
+                    factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                    factorio_state_table.update_item(Key={'ConfigKey': 'OfflineCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
+                    print("ℹ️ Counters (ZeroPlayerCount, OfflineCount) reset for new session.")
+                except Exception as e:
+                    print(f"⚠️ Failed to reset counters: {e}")
+
+                # イベント検知時の経過時間算出用に開始時刻を記録
                 factorio_state_table.update_item(
-                    Key={'ConfigKey': 'ActivePassword'},
-                    UpdateExpression="set #val = :v",
-                    ExpressionAttributeNames={'#val': 'Value'},
-                    ExpressionAttributeValues={':v': new_pwd}
+                    Key={'ConfigKey': 'StartStartTime'},
+                    UpdateExpression="set #ts = :val",
+                    ExpressionAttributeNames={'#ts': 'Timestamp'},
+                    ExpressionAttributeValues={':val': str(start_process_time)}
                 )
-            except Exception as e:
-                print(f"⚠️ Failed to cache active password to DynamoDB: {e}")
 
-            start_process_time = time.time()
-            # 以前の停止処理マーカーが残っている可能性があるため強制削除
-            factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
-
-            # 各種カウントをリセット
-            try:
-                factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
-                factorio_state_table.update_item(Key={'ConfigKey': 'OfflineCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
-                factorio_state_table.update_item(Key={'ConfigKey': 'AutoRestartCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
-                print("ℹ️ Counters reset for new session.")
-            except Exception as e:
-                print(f"⚠️ Failed to reset counters: {e}")
-
-            # 無人停止カウントおよびRCON無応答カウントをリセット
-            try:
-                factorio_state_table.update_item(Key={'ConfigKey': 'ZeroPlayerCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
-                factorio_state_table.update_item(Key={'ConfigKey': 'OfflineCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': 0})
-                print("ℹ️ Counters (ZeroPlayerCount, OfflineCount) reset for new session.")
-            except Exception as e:
-                print(f"⚠️ Failed to reset counters: {e}")
-
-            # イベント検知時の経過時間算出用に開始時刻を記録
-            factorio_state_table.update_item(
-                Key={'ConfigKey': 'StartStartTime'},
-                UpdateExpression="set #ts = :val",
-                ExpressionAttributeNames={'#ts': 'Timestamp'},
-                ExpressionAttributeValues={':val': str(start_process_time)}
-            )
-
-            ec2.start_instances(InstanceIds=[config['instance_id']])
-            ssm = get_client('ssm')
-            runtime_paths_ready = False
-            runtime_check_error_logged = False
-            
-            # 内部仕様: 起動完了までポーリング待機 (Lambdaタイムアウトに注意)
-            # RCONが通る＝ゲームプロセス起動完了とみなす
-            time.sleep(10) # 起動直後の待機
-            max_attempts = int(config.get('rcon_ready_check_max_attempts', 12))
-            interval = int(config.get('rcon_ready_check_interval_seconds', 10))
-            
-            for _ in range(max_attempts):
-                # IPがまだ取れない場合があるため再取得
-                inst_refresh = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
-                current_ip = inst_refresh.get('PublicIpAddress')
-                if current_ip:
-                    if not runtime_paths_ready:
-                        ready_ok, ready_status, ready_out, ready_err = _ensure_s3files_runtime_paths(ssm, config['instance_id'])
-                        if not ready_ok:
-                            print(f"⚠️ Runtime path check failed before RCON. status={ready_status} stderr={ready_err}")
-                            if ready_out:
-                                print(f"⚠️ Runtime path check output: {ready_out}")
-                            if not runtime_check_error_logged:
-                                notify(
-                                    f"⚠️ [LOG] Startup storage check failed. status={ready_status} stderr={ready_err}",
-                                    mode='log'
+                ec2.start_instances(InstanceIds=[config['instance_id']])
+                ssm = get_client('ssm')
+                runtime_paths_ready = False
+                runtime_check_error_logged = False
+                
+                # 内部仕様: 起動完了までポーリング待機 (Lambdaタイムアウトに注意)
+                # RCONが通る＝ゲームプロセス起動完了とみなす
+                time.sleep(10) # 起動直後の待機
+                max_attempts = int(config.get('rcon_ready_check_max_attempts', 12))
+                interval = int(config.get('rcon_ready_check_interval_seconds', 10))
+                
+                for _ in range(max_attempts):
+                    # IPがまだ取れない場合があるため再取得
+                    inst_refresh = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
+                    current_ip = inst_refresh.get('PublicIpAddress')
+                    if current_ip:
+                        if not runtime_paths_ready:
+                            ready_ok, ready_status, ready_out, ready_err = _ensure_s3files_runtime_paths(ssm, config['instance_id'])
+                            if not ready_ok:
+                                print(f"⚠️ Runtime path check failed before RCON. status={ready_status} stderr={ready_err}")
+                                if ready_out:
+                                    print(f"⚠️ Runtime path check output: {ready_out}")
+                                transient_boot_error = (
+                                    ready_status == "SendCommandFailed"
+                                    and (
+                                        "InvalidInstanceId" in (ready_err or "")
+                                        or "not in a valid state" in (ready_err or "").lower()
+                                    )
                                 )
-                                runtime_check_error_logged = True
-                            time.sleep(interval)
-                            continue
-                        runtime_paths_ready = True
-                    check = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], "/version")
-                    if "Error" not in check:
-                        # 3. 起動完了後、RCON経由でゲーム内パスワードを適用
-                        pwd_res = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], f"/config set password {new_pwd}")
-                        
-                        # パスワード設定の成否をログに記録 (失敗時のみ通知)
-                        if "Error" in pwd_res or "Unknown" in pwd_res:
-                            notify(f"⚠️ [LOG] Failed to apply game password via RCON: {pwd_res}", mode='log')
-                        
-                        elapsed = int(time.time() - start_process_time)
-                        notify(f"🚀 [LOG] Factorio server is ready (Time: {elapsed}s)", mode='log')
-                        
-                        # 起動が確認できたので、ステータス表示用の起動マーカーを削除
-                        factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
+                                if transient_boot_error:
+                                    print("ℹ️ Runtime path check is waiting for EC2/SSM readiness; retrying.")
+                                elif not runtime_check_error_logged:
+                                    notify(
+                                        f"⚠️ [LOG] Startup storage check failed. status={ready_status} stderr={ready_err}",
+                                        mode='log'
+                                    )
+                                    runtime_check_error_logged = True
+                                time.sleep(interval)
+                                continue
+                            runtime_paths_ready = True
+                        check = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], "/version")
+                        if "Error" not in check:
+                            # 3. 起動完了後、RCON経由でゲーム内パスワードを適用
+                            pwd_res = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], f"/config set password {new_pwd}")
+                            
+                            # パスワード設定の成否をログに記録 (失敗時のみ通知)
+                            if "Error" in pwd_res or "Unknown" in pwd_res:
+                                notify(f"⚠️ [LOG] Failed to apply game password via RCON: {pwd_res}", mode='log')
+                            
+                            elapsed = int(time.time() - start_process_time)
+                            notify(f"🚀 [LOG] Factorio server is ready (Time: {elapsed}s)", mode='log')
+                            
+                            # 起動が確認できたので、ステータス表示用の起動マーカーを削除
+                            factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
 
-                        # 生成した新パスワードとポート情報を取得して完了メッセージを生成
-                        port = config.get('factorio_game_port', 34197)
-                        return {
-                            "embeds": [{
-                                "title": get_msg("start", "completed_title", locale),
-                                "description": get_msg("start", "completed", locale, ip=current_ip, port=port, pwd=new_pwd),
-                                "color": COLOR_GREEN
-                            }]
-                        }
-                time.sleep(interval)
+                            # 生成した新パスワードとポート情報を取得して完了メッセージを生成
+                            port = config.get('factorio_game_port', 34197)
+                            return {
+                                "embeds": [{
+                                    "title": get_msg("start", "completed_title", locale),
+                                    "description": get_msg("start", "completed", locale, ip=current_ip, port=port, pwd=new_pwd),
+                                    "color": COLOR_GREEN
+                                }]
+                            }
+                    time.sleep(interval)
 
-            if not runtime_paths_ready:
-                factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
-                notify(
-                    "⚠️ [LOG] Startup aborted due to storage path check failure. Please verify S3 Files mount and config path.",
-                    mode='log'
-                )
-                return (
-                    "⚠️ 起動後のストレージ確認に失敗しました。S3 Files のマウントと /mnt/factorio-data/config/server-settings.json を確認してください。"
-                    if locale == 'ja'
-                    else "⚠️ Startup storage check failed. Please verify S3 Files mount and /mnt/factorio-data/config/server-settings.json."
-                )
-            return get_msg("start", "success", locale)
-        return get_msg("start", "already", locale)
+                if not runtime_paths_ready:
+                    factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
+                    server_settings_path = _resolve_server_settings_path()
+                    notify(
+                        "⚠️ [LOG] Startup aborted due to storage path check failure. Please verify S3 Files mount and config path.",
+                        mode='log'
+                    )
+                    return (
+                        f"⚠️ 起動後のストレージ確認に失敗しました。管理者にログチャットの確認と、S3 Files のマウントおよび {server_settings_path} の設定確認を依頼してください。"
+                        if locale == 'ja'
+                        else f"⚠️ Startup storage check failed. Please ask an administrator to review the log chat and verify S3 Files mount plus {server_settings_path}."
+                    )
+                return get_msg("start", "success", locale)
+            return get_msg("start", "already", locale)
+        finally:
+            _release_start_lock(start_lock_token)
 
 def handle_stop(event, ec2, inst, state, ip, locale):
         # TODO ID:006: SERVER_RUN_MODE=STATICはstop_instances、DYNAMICはterminate_instancesへ分岐し、終了対象InstanceIdをセッション情報から解決する
@@ -747,15 +918,28 @@ def lambda_handler(event, context):
     action = event.get('action')
     test_mode = event.get('test_mode', False)
     config["test_mode"] = test_mode
+    config["start_lock_denied"] = False
 
     # scripts/test_runner 用: S3 状態の参照・巻き戻し（Executor ロールで実行。Regist に S3 削除権限を広げない）
-    if action in ('integration_query_save_state', 'integration_restore_save_state'):
+    if action in (
+        'integration_query_save_state',
+        'integration_restore_save_state',
+        'integration_clear_start_lock',
+        'integration_query_start_lock',
+        'integration_detect_startup_failure'
+    ):
         if not test_mode:
             return {"ok": False, "error": "test_mode is required"}
         if not factorio_state_table:
             return {"ok": False, "error": "DynamoDB not initialized"}
         if action == 'integration_query_save_state':
             return handle_integration_query_save_state(event)
+        if action == 'integration_clear_start_lock':
+            return _force_release_start_lock()
+        if action == 'integration_query_start_lock':
+            return _query_start_lock_state()
+        if action == 'integration_detect_startup_failure':
+            return handle_integration_detect_startup_failure(event)
         return handle_integration_restore_save_state(event)
 
     # EventBridge からの EC2 状態変更通知の処理
@@ -792,9 +976,10 @@ def lambda_handler(event, context):
         else:
             try:
                 if state_name == 'stopped':
-                    # 停止開始時刻を DynamoDB から取得して経過時間を算出
-                    res = factorio_state_table.get_item(Key={'ConfigKey': 'StopStartTime'})
-                    start_time_str = res.get('Item', {}).get('Timestamp')
+                    marker_acquired, start_time_str = _consume_event_marker('StopStartTime')
+                    if not marker_acquired:
+                        print("ℹ️ Duplicate stopped event ignored (StopStartTime already consumed).")
+                        return {"status": "duplicate_ignored", "state": "stopped"}
                     
                     elapsed_msg = ""
                     if start_time_str:
@@ -803,12 +988,12 @@ def lambda_handler(event, context):
                     msg = f"🔌 [LOG] EC2 Instance ({instance_id}) has stopped. Shutdown sequence completed.{elapsed_msg}"
                     if is_suppressed: print(f"🔕 [SILENT MODE] Suppressed Notification: {msg}")
                     else: notify(msg, mode='log')
-                    factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
                     return {"status": "ok", "suppressed_msg": msg if is_suppressed else None}
                 elif state_name == 'running':
-                    # 起動開始時刻を DynamoDB から取得して経過時間を算出
-                    res = factorio_state_table.get_item(Key={'ConfigKey': 'StartStartTime'})
-                    start_time_str = res.get('Item', {}).get('Timestamp')
+                    marker_acquired, start_time_str = _consume_event_marker('StartStartTime')
+                    if not marker_acquired:
+                        print("ℹ️ Duplicate running event ignored (StartStartTime already consumed).")
+                        return {"status": "duplicate_ignored", "state": "running"}
                     
                     elapsed_msg = ""
                     if start_time_str:
@@ -817,7 +1002,6 @@ def lambda_handler(event, context):
                     msg = f"🚀 [LOG] EC2 Instance ({instance_id}) is now running.{elapsed_msg}"
                     if is_suppressed: print(f"🔕 [SILENT MODE] Suppressed Notification: {msg}")
                     else: notify(msg, mode='log')
-                    factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
                     return {"status": "ok", "suppressed_msg": msg if is_suppressed else None}
             except Exception as e:
                 print(f"❌ Error processing EC2 state change: {e}")
@@ -830,6 +1014,18 @@ def lambda_handler(event, context):
     notify_mode = 'patch' if action in ['status', 'pass', 'license'] else 'followup'
     
     result = execute_ec2_command(action, event)
+
+    debug_instance_id = None
+    debug_state = None
+    try:
+        ec2_dbg = get_client('ec2')
+        dbg_instance_id = (config.get('instance_id') or '').strip().strip("'\"")
+        if dbg_instance_id:
+            dbg_inst = ec2_dbg.describe_instances(InstanceIds=[dbg_instance_id])['Reservations'][0]['Instances'][0]
+            debug_instance_id = dbg_instance_id
+            debug_state = dbg_inst.get('State', {}).get('Name')
+    except Exception as e:
+        print(f"⚠️ test_mode debug state fetch failed: {e}")
     
     # If in test_mode, return the result directly for inspection
     if test_mode:
@@ -838,6 +1034,11 @@ def lambda_handler(event, context):
             resp.update({"content": None, "embeds": result.get('embeds')})
         else: # For plain text
             resp.update({"content": result, "embeds": None})
+        resp.update({
+            "debug_instance_id": debug_instance_id,
+            "debug_state": debug_state,
+            "debug_start_lock_denied": bool(config.get("start_lock_denied"))
+        })
         return resp
 
     # Discord Interaction (Tokenが存在する) 場合のみ、応答を返す

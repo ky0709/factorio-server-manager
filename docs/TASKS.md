@@ -189,6 +189,7 @@
 [x] ID:034 [FEAT] [OPS] EC2 起動/停止オーケストレーション（save->logs同期->stop）を自動化
     ・関連箇所: docs/ec2_setup_reference.md, scripts/init_aws_resources.py, aws/Lambda/Factorio_Executor/lambda_function.py
     ・背景: S3 Files の手動確認・補正手順が残っており、インスタンス再作成や初回起動時の運用負荷が高いため。なお、受け入れ前提の `ID:046/047/048` は完了済みで、残論点は「起動時マウント/リンクの自動安定適用」と「`/mnt/factorio-data/logs` の削除または空ディレクトリ維持の明示判断」の証跡化。加えて、同日複数回の停止でもログが上書きされないよう、`logs/date=YYYY-MM-DD/` 配下を UTC セッションID付きファイル名へ移行する必要があった。
+    ・実測メモ: 2026-04-21 に dev で `/start -> /save -> /stop` を再実行し、`/status` の最終セーブ更新（2.2MB）と停止完了ログ通知（シーケンス 28s）を確認済み。
     ・運用メモ: dev/prod はバケット分離済みかつ現時点は 1環境1サーバー想定のため、停止時ログ同期先は `logs/` に固定する（`logs/env=.../instance=...` は採用しない）。
     ・完了条件: 起動時に必要なマウントとリンク設定が自動で安定適用され、手動介入なしでゲーム実行パスが揃うこと。停止フローで `save` → `logs` の S3 同期 → EC2 停止の順序を強制し、AMI + 起動オプション運用でもログ退避漏れを防げること。`SERVICE_UNIT_NAME` を `.env` / SSM 経由で指定し、停止対象ユニットを環境ごとに明示管理できること。移行完了後に未使用となる `/mnt/factorio-data/logs` の削除（または空ディレクトリ維持の明示判断）を実施し、消し忘れを防ぐこと。加えて受け入れ条件として「ID:046（ライフサイクル権限）完了」「ID:047（dev 4ルール適用確認）完了」「ID:048（`logs/date=YYYY-MM-DD/` 着地確認）完了」を満たし、停止時ログが `factorio-<kind>__session-<UTC>.log` と `session-<UTC>.json` で保存されること。
 
@@ -207,10 +208,10 @@
     ・背景: `/log` コマンド導入は未定だが、将来的なユーザーレポート提供に向けて、ログ収集・検索基盤の選定を先に行う必要があるため。
     ・完了条件: Glue/Athena を使ったログ収集・分析案の実現性、概算コスト、運用負荷、Discord連携方式（コマンド化有無を含む）を整理した方針が確定していること。
 
-[ ] ID:038 [TASK] [UI] Discord リモート管理コマンドの枠組みを先行整備
+[x] ID:038 [TASK] [UI] Discord リモート管理コマンドの枠組みを先行整備
     ・関連箇所: scripts/register.py, aws/Lambda/Factorio_Interactor/lambda_function.py, docs/command_reference.md, .env.example
     ・背景: `/config` `/mods` `/admin` の本実装前に、コマンド登録・ルーティング・権限制御の枠組みのみ先行整備し、運用モード拡張（ID:006）を優先実装できる状態にしたいため。
-    ・完了条件: 対象コマンドの定義と安全な暫定応答（maintenance/案内）が動作し、`RESTRICTED_COMMAND_STRINGS` とは別の強制管理者制御変数（例: `STRICT_ADMIN_COMMAND_STRINGS`）で実行制御できること。
+    ・完了条件: 対象コマンドの定義と安全な暫定応答（maintenance/案内）が動作し、`RESTRICTED_COMMAND_STRINGS` とは別の強制管理者制御変数（例: `STRICT_ADMIN_USER_COMMAND_STRINGS`）で実行制御できること。
 
 [ ] ID:039 [TASK] [QUAL] Factorio_Executor をハイブリッド実装前にモジュール分割（同一 Lambda 内）
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py
@@ -260,6 +261,7 @@
 [x] ID:048 [TASK] [OPS] `/start -> /stop` 実行で `logs/date=YYYY-MM-DD/` 着地を再確認
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, scripts/test_runner.py, docs/TASKS.md
     ・背景: 当初は `logs/env=.../instance=...` への着地となっていたが、Executor のデプロイ反映後に `/start -> /stop` を再実行し、`logs/date=2026-04-20/` 配下への着地（`factorio-current.log` / `factorio-previous.log`）を確認できたため。
+    ・実測メモ: 2026-04-21 に dev で `/start -> /save -> /stop` を再確認し、`/status` で最終セーブ更新（2.2MB）および停止完了ログ通知まで確認済み。
     ・完了条件: stop 実行後に `logs/date=YYYY-MM-DD/` へオブジェクトが存在することをCLIで確認でき、未着地時は原因（空ディレクトリ/同期失敗/権限）と再実行手順が記録されること。
 
 [x] ID:049 [TASK] [OPS] ID:034 の受け入れ条件をサブタスク完了ベースで再定義
@@ -276,6 +278,93 @@
     ・関連箇所: docs/env_reference.md, .env.example, .env.dev, scripts/register.py, scripts/check_env_leaks.py
     ・背景: 環境変数が増加し、運用・機密・機能別の責務が混在して見通しが低下しているため。先に `env_reference.md` で定義と運用ルールを固定したうえで `.env` 分割を段階的に進める必要があるため。
     ・完了条件: `docs/env_reference.md` に全主要キーの用途・必須/任意・機密区分・参照先が整理され、その定義に従って `.env` を責務単位へ分割しても `register.py` / `check_env_leaks.py` / デプロイスクリプトの挙動が維持されること。
+
+[ ] ID:052 [TASK] [OPS] apply_s3_lifecycle.py に差分検知スキップを追加
+    ・関連箇所: scripts/apply_s3_lifecycle.py, docs/TASKS.md
+    ・背景: lifecycle 方針を定期適用する運用では、設定変更がない場合に毎回 PutLifecycleConfiguration を実行すると不要な API 実行と監査ノイズが増えるため。
+    ・完了条件: 現在のバケット lifecycle 設定と目標設定を比較し、実質差分がない場合は更新をスキップして「No changes detected」を明示できること。
+
+[ ] ID:053 [TASK] [OPS] deploy_all.py に lifecycle ステップを明示実行オプション付きで統合
+    ・関連箇所: scripts/deploy_all.py, scripts/apply_s3_lifecycle.py, docs/TASKS.md
+    ・背景: lifecycle は常時実行ではなく明示実行が望ましいため、deploy_all の通常フローを維持しつつ必要時のみ同一パイプラインで実行できる導線が必要なため。
+    ・完了条件: deploy_all に lifecycle ステップ（例: `lifecycle`）が追加され、デフォルトでは実行されず `--only lifecycle` や専用フラグで明示実行できること。
+
+[x] ID:054 [FIX] [OPS] 起動時ストレージ確認の server-settings 参照先を環境変数化
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, scripts/register.py, .env.example
+    ・背景: dev 環境で `server-settings-dev.json` を運用していても、Executor の起動前チェックが `server-settings.json` 固定参照のため `/start` 失敗が顕在化したため。
+    ・完了条件: `SERVER_SETTINGS_FILE_NAME` を `.env` / SSM 経由で指定でき、Executor の起動前チェックとエラーメッセージが同一の設定値を参照すること。未指定時は `server-settings.json` を既定値として後方互換を維持すること。
+
+[x] ID:055 [FIX] [QUAL] test_runner の start テストで起動時ストレージ確認失敗を明示判定
+    ・関連箇所: scripts/test_runner.py
+    ・背景: 現行の Test 4 は start 失敗を包括的に扱うのみで、S3 Files マウントや server-settings 不備による起動前ストレージ確認失敗を専用エラーとして識別できないうえ、停止前提が満たされない場合に `Executor Start (Skip)` 成功へ寄る曖昧さがあるため。
+    ・完了条件: Test 4 で Executor の start 応答に含まれるストレージ確認失敗メッセージを検出し、失敗理由として明示出力できること。加えて、start 実行前の EC2 状態が `stopped` でない場合は前提未達として失敗判定にし、`already running/準備中` 応答も成功扱いにしないこと。判定根拠として Test 4 直前の EC2 状態（pre_state）をログ出力すること。
+
+[x] ID:056 [TASK] [QUAL] test_runner の start テスト後に自動停止クリーンアップを追加
+    ・関連箇所: scripts/test_runner.py
+    ・背景: `--tests 4` の実行で start 検証後にサーバーが起動したまま残ると、都度手動で停止が必要になり運用負荷が高いため。
+    ・完了条件: Test 4 で実際に起動成功した場合、Test 6 を選択していなくても終了処理で stop を自動実行し、停止完了待機まで結果がテストサマリーに記録されること。
+
+[x] ID:057 [FIX] [QUAL] test_runner と Executor の start 判定差異を可視化
+    ・関連箇所: scripts/test_runner.py, aws/Lambda/Factorio_Executor/lambda_function.py
+    ・背景: Test 4 直前の EC2 状態が `stopped` でも Executor の start 応答が「既に起動/準備中」となる事象があり、同一実行内での判定差異の原因をログだけで特定できないため。
+    ・完了条件: Executor の test_mode 応答に `instance_id` と `state` のデバッグ情報が含まれ、test_runner の Test 4 で pre_state と比較表示できること。不一致時は専用失敗項目としてサマリーに記録されること。
+
+[x] ID:058 [FIX] [QUAL] test_runner の同時実行をロックで防止
+    ・関連箇所: scripts/test_runner.py
+    ・背景: `--tests 4` の連続実行時に前回 run が未完了のまま重複起動し、start/stop 判定が相互干渉して結果が不安定になるため。
+    ・完了条件: test_runner 開始時にロック取得を行い、既存ロックが有効な場合は即終了すること。異常終了時を含めて finally でロック解除されること。
+
+[x] ID:059 [FIX] [LOGIC] Executor の `/start` 同時実行を DynamoDB ロックで直列化
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py
+    ・背景: test_runner 側で単一実行制御しても、Discord 等の別経路から同時に `/start` が呼ばれると、同一インスタンスに対する状態判定が競合し `stopped`/`running` の不整合が発生するため。
+    ・完了条件: `/start` 実行時に DynamoDB 条件付きロックを取得し、ロック保持中の重複 `/start` を拒否できること。正常系/異常系を問わずロックが解放され、クラッシュ時は TTL で回復可能であること。
+
+[x] ID:060 [FIX] [QUAL] test_runner Test4 に競合時の自動停止リトライを追加
+    ・関連箇所: scripts/test_runner.py
+    ・背景: Test4 実行時に外部トリガーでインスタンスが一時的に running へ遷移すると、`State Mismatch` / `Unexpected Running` で本来の起動チェックまで到達できないため。
+    ・完了条件: Test4 で `already running` 応答または事前状態 `running` を受けた場合、1回だけ stop→stopped待機→start再試行を自動実行し、再試行後の結果で最終判定できること。加えて Executor の start ロック競合時は `test_mode` デバッグ情報を見て待機リトライできること。
+
+[x] ID:061 [FIX] [QUAL] test_runner 開始時に test_mode ロック残留を自動解放
+    ・関連箇所: scripts/test_runner.py, aws/Lambda/Factorio_Executor/lambda_function.py
+    ・背景: `/start` ロック導入後、過去実行の残留ロックがあると Test4 がロック競合で進まず、`SERVER_SETTINGS_FILE_NAME` 起因の本来検証に到達しないため。
+    ・実測メモ: 2026-04-21 の `--tests 4 --silent` で CloudTrail `StartInstances` の実行主体は `Factorio_Executor-dev` のみ（外部主体なし）だった。Test4 再試行時の自己競合を抑えるため、`test_runner` 側で cleanup retry を1回に制限し、再試行前の `StartActionLock` 解放待機を追加。
+    ・完了条件: test_runner 開始時に test_mode 限定のロック解放アクションを呼び、`StartActionLock` 状態を参照してロック解放待機を行ったうえで Test4 を開始できること。加えて test_mode の `/start` 実行時はロック残留を強制クリアして検証実行を優先できること。
+
+[x] ID:062 [FIX] [QUAL] test_runner のローカル実行安定化（文字コード/確認入力/復元no-op）
+    ・関連箇所: scripts/test_runner.py, docs/tasks.md
+    ・背景: Windows（cp932）で絵文字ログ出力時に UnicodeEncodeError で実行前に停止し、また対話確認と save state 復元の no-op 失敗判定が CI/手動検証の連続実行を阻害するため。
+    ・実測メモ: 2026-04-21 に `python scripts/test_runner.py dev --tests 4 --silent --yes` を実行し、`Score: 3/3` で終了コード 0 を確認。`already running` 応答時も post-state が `running` なら成功扱いへ補正した。
+    ・完了条件: `python scripts/test_runner.py dev --tests 4 --silent` が追加の環境変数指定なしで起動し、確認入力を明示フラグで省略可能で、復元対象なし/実質差分なしの restore が失敗扱いにならないこと。
+
+[x] ID:063 [FIX] [QUAL] test_runner Test4 を厳格判定へ戻し mount失敗検知を優先
+    ・関連箇所: scripts/test_runner.py, docs/tasks.md
+    ・背景: `SERVER_SETTINGS_FILE_NAME` が誤値の環境では起動後ストレージ確認失敗を検出したいが、`already running` 応答の post-state 成功補正により失敗を取りこぼすケースがあるため。
+    ・実測メモ: 2026-04-21 に `python scripts/test_runner.py dev --tests 4 --silent --yes` で再検証し、`Executor Start (Unexpected Running)` で失敗（終了コード1）することを確認。厳格判定が復帰した。
+    ・完了条件: Test4 で `already running/準備中` 応答は成功補正せず失敗扱いとし、誤設定時の mount/ストレージ確認失敗が確実に失敗判定へ反映されること。
+
+[x] ID:064 [FIX] [QUAL] test_runner Test4 の失敗ラベルを原因別に明確化
+    ・関連箇所: scripts/test_runner.py, docs/tasks.md
+    ・背景: `Executor Start (Unexpected Running)` だけでは「状態不一致」「ロック競合」「マウント確認失敗」の切り分けが伝わりにくく、調査判断を誤りやすいため。
+    ・実測メモ: 2026-04-21 に `python scripts/test_runner.py dev --tests 4 --silent --yes` を再実行し、サマリーが `Executor Start (State Mismatch)` として出力されることを確認。
+    ・完了条件: Test4 の失敗結果が `State Mismatch` / `Lock Contention` / `Mount Check` など原因別に出力され、サマリーだけで一次切り分け可能になること。
+
+[x] ID:065 [FIX] [QUAL] test_runner 終了時に稼働中サーバーを自動停止
+    ・関連箇所: scripts/test_runner.py, docs/tasks.md
+    ・背景: テスト失敗や分岐条件によって終了時に EC2 が起動したまま残ると、次回検証に干渉し運用コストも増えるため。
+    ・実測メモ: 2026-04-21 に `python scripts/test_runner.py dev --tests 4 --silent --yes` を再実行し、失敗終了時でも `[Auto Cleanup] Stop server because final state is still running` が発火して stopped まで遷移することを確認。
+    ・完了条件: test_runner 終了処理で最終 EC2 状態を確認し、`running` の場合は Test6 実施有無に関係なく stop を実行して stopped まで待機すること。
+
+[x] ID:066 [FIX] [QUAL] test_runner Test4 で suppresssed_logs の起動失敗を Mount Check として検出
+    ・関連箇所: scripts/test_runner.py, docs/tasks.md
+    ・背景: 実運用では `/start` 失敗時にメインチャットへストレージ確認失敗が返るが、test_mode では `already running/準備中` 応答に吸収され、`suppressed_logs` 側にだけ失敗兆候が残るケースがあるため。
+    ・実測メモ: 2026-04-21 の `python scripts/test_runner.py dev --tests 4 --silent --yes` で、`suppressed_logs` から `Startup storage check failed` を検出し `Executor Start (Mount Check)` 失敗へ分類できることを確認。
+    ・完了条件: Test4 で `suppressed_logs` に `Startup storage check failed` / `Startup aborted due to storage path check failure` が含まれる場合、`Executor Start (Mount Check)` 失敗として判定できること。
+
+[x] ID:067 [FIX] [QUAL] test_runner Test4 の State Mismatch を CloudWatch 補助判定で再分類
+    ・関連箇所: scripts/test_runner.py, docs/tasks.md
+    ・背景: test_mode の `already running` 早期返却では `suppressed_logs` が空の回があり、実際の起動失敗（mount check）でも `State Mismatch` としか見えないため。
+    ・実測メモ: 2026-04-21 に test_runner 直接の CloudWatch StartQuery 判定で `AccessDeniedException` が発生したため、Executor 側に `integration_detect_startup_failure` を追加して `logs:FilterLogEvents` で判定する方式へ変更。`deploy_policies.py dev` と `deploy_lambda.py dev` 反映後の `python scripts/test_runner.py dev --tests 4 --silent --yes` で `Executor Start (Mount Check)` へ再分類できることを確認。
+    ・完了条件: Test4 で `State Mismatch` 判定時に CloudWatch Logs（Executor）を直近参照し、`Startup storage check failed` / `Startup aborted due to storage path check failure` が見つかれば `Executor Start (Mount Check)` に再分類できること。
 
 ## ステップ横断の考慮事項（開発・着手前チェック）
 

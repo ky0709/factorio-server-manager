@@ -14,6 +14,7 @@ admin_config = {
     "user_ids": [],
     "role_ids": [],
     "restricted_commands_set": set(),
+    "strict_admin_commands_set": set(),
     "discord_public_key": None,
     "command_routing": {},
     "executor_lambda": None,
@@ -80,6 +81,13 @@ def update_admin_config():
             ":".join(p.strip() for p in i.split(":"))
             for i in restricted_raw.split(',') if i.strip()
         }
+
+        # 新キーを優先し、旧キーは後方互換として受け入れる
+        strict_raw = params.get('strict_admin_user_command_strings', '') or params.get('strict_admin_command_strings', '')
+        admin_config["strict_admin_commands_set"] = {
+            ":".join(p.strip() for p in i.split(":"))
+            for i in strict_raw.split(',') if i.strip()
+        }
         
         ephemeral_raw = params.get('ephemeral_command_strings', '')
         admin_config["ephemeral_commands_set"] = {
@@ -122,6 +130,18 @@ def is_authorized(command_path, user_id, user_roles):
     コマンドの実行権限を確認する。
     親階層または完全なパスが制限リストに含まれているかを確認する。
     """
+    # STRICT_ADMIN_USER_COMMAND_STRINGS は常に「ADMIN_USER_IDS のみ」で判定する
+    strict_current_path = ""
+    is_strict_admin = False
+    for segment in command_path:
+        strict_current_path = f"{strict_current_path}:{segment}" if strict_current_path else segment
+        if strict_current_path in admin_config["strict_admin_commands_set"]:
+            is_strict_admin = True
+            break
+
+    if is_strict_admin:
+        return user_id in admin_config["user_ids"]
+
     # 階層を順に結合しながらチェック (例: "restore" -> "restore:daily" -> "restore:daily:list")
     current_path = ""
     is_restricted = False
