@@ -155,7 +155,7 @@
     ・背景: test_runner から S3/DynamoDB へ直接アクセスさせると Regist 権限が肥大化し、開発用ユーザーの責務分離が崩れるため、検証と巻き戻しは実行責務を持つ Lambda 側へ寄せる必要があるため。
     ・完了条件: test_runner は Lambda 呼び出しの結果判定に専念し、S3 バージョン確認・後始末は Lambda 内処理で完結すること。
 
-[ ] ID:028 [TASK] [QUAL] test_runner に特定テストのみ実行するオプションを追加
+[x] ID:028 [TASK] [QUAL] test_runner に特定テストのみ実行するオプションを追加
     ・関連箇所: scripts/test_runner.py
     ・背景: ID:027 の実装・検証では save/stop 周辺だけを繰り返し試したく、毎回フルスイートを流すと時間と副作用が大きいため、対象テストだけを選択実行できるようにする必要があるため。
     ・完了条件: test_runner が test 名またはカテゴリを指定して部分実行でき、既存のフル実行フローも維持されること。
@@ -271,6 +271,11 @@
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, scripts/register.py, .env.example, docs/ec2_setup_reference.md
     ・背景: 現在の Executor は `/mnt/factorio-data` を固定前提としており、独自構築サーバーでマウント先が異なる場合に起動時チェックや停止時アンマウントで不整合が発生するため。
     ・完了条件: `FACTORIO_DATA_MOUNT_PATH`（仮称）を `.env` / SSM 経由で参照し、Executor の起動時チェック・停止時アンマウント・関連手順が同一値で運用できること。
+
+[ ] ID:051 [TASK] [OPS] env_reference 作成後に `.env` を責務単位で分割する
+    ・関連箇所: docs/env_reference.md, .env.example, .env.dev, scripts/register.py, scripts/check_env_leaks.py
+    ・背景: 環境変数が増加し、運用・機密・機能別の責務が混在して見通しが低下しているため。先に `env_reference.md` で定義と運用ルールを固定したうえで `.env` 分割を段階的に進める必要があるため。
+    ・完了条件: `docs/env_reference.md` に全主要キーの用途・必須/任意・機密区分・参照先が整理され、その定義に従って `.env` を責務単位へ分割しても `register.py` / `check_env_leaks.py` / デプロイスクリプトの挙動が維持されること。
 
 ## ステップ横断の考慮事項（開発・着手前チェック）
 
