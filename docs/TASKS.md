@@ -213,8 +213,8 @@
     ・背景: `/config` `/mods` `/admin` の本実装前に、コマンド登録・ルーティング・権限制御の枠組みのみ先行整備し、運用モード拡張（ID:006）を優先実装できる状態にしたいため。
     ・完了条件: 対象コマンドの定義と安全な暫定応答（maintenance/案内）が動作し、`RESTRICTED_COMMAND_STRINGS` とは別の強制管理者制御変数（例: `STRICT_ADMIN_USER_COMMAND_STRINGS`）で実行制御できること。
 
-[ ] ID:039 [TASK] [QUAL] Factorio_Executor をハイブリッド実装前にモジュール分割（同一 Lambda 内）
-    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py
+[x] ID:039 [TASK] [QUAL] Factorio_Executor をハイブリッド実装前にモジュール分割（同一 Lambda 内）
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Executor/integration_handlers.py, aws/Lambda/Factorio_Executor/executor_infrastructure.py, aws/Lambda/Factorio_Executor/executor_eventbridge.py
     ・背景: ID:006 実装時に InstanceId 解決・起動/終了・EventBridge 連携が複雑化するため、**先に同一 Lambda 内で責務境界**（例: EC2 オーケストレーション、RCON、カタログ/DynamoDB・S3 メタ、Discord 応答整形、EB イベント処理）をファイルまたはモジュールに分割し、ハイブリッド分岐を載せる土台を作る必要があるため。
     ・完了条件: `lambda_handler` が薄くなり、主要処理がモジュール化された状態で既存フロー（STATIC）の回帰テストが通ること。分割方針が README または `docs/TASKS.md` から追跡できること。
 

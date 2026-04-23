@@ -5,11 +5,25 @@ import time
 import secrets
 import string
 from datetime import datetime
-from decimal import Decimal
-from botocore.exceptions import ClientError
-
 # レイヤーからのインポート
 from factorio_common.utils import JST, get_client, fetch_config_from_ssm, run_rcon_command, format_msg, notify_via_lambda
+from integration_handlers import (
+    handle_integration_detect_startup_failure,
+    handle_integration_query_save_state,
+    handle_integration_restore_save_state,
+)
+from executor_infrastructure import (
+    acquire_start_lock,
+    ensure_s3files_runtime_paths,
+    force_release_start_lock,
+    query_start_lock_state,
+    release_start_lock,
+    resolve_server_settings_path,
+    resolve_service_unit_name,
+    run_ssm_shell_and_wait,
+    update_latest_save_info as _update_latest_save_info_impl,
+)
+from executor_eventbridge import handle_ec2_instance_state_event
 
 def get_msg(category, key, locale='ja', **kwargs):
     return format_msg({}, category, key, locale, **kwargs)
@@ -20,371 +34,42 @@ config = {"initialized": False}
 factorio_state_table = None
 _suppressed_logs = []
 
-def _dynamo_to_json_safe(val):
-    """integration テスト応答を JSON 直列化可能にする。"""
-    if isinstance(val, Decimal):
-        return str(val)
-    if isinstance(val, dict):
-        return {k: _dynamo_to_json_safe(v) for k, v in val.items()}
-    if isinstance(val, list):
-        return [_dynamo_to_json_safe(v) for v in val]
-    return val
-
-
-def get_s3_latest_save_entry():
-    """S3 バージョニング有効バケットにおける save キーの最新エントリ（Version または DeleteMarker）。"""
-    s3 = get_client('s3')
-    bucket = config.get('s3_bucket_name')
-    key = config.get('save_file_key')
-    if not bucket or not key:
-        return None
-    resp = s3.list_object_versions(Bucket=bucket, Prefix=key)
-    versions = [v for v in resp.get('Versions', []) if v.get('Key') == key]
-    delete_markers = [m for m in resp.get('DeleteMarkers', []) if m.get('Key') == key]
-    latest_entry = None
-    if versions:
-        latest_entry = versions[0]
-    if delete_markers and (not latest_entry or delete_markers[0]['LastModified'] > latest_entry['LastModified']):
-        latest_entry = delete_markers[0]
-    return latest_entry
-
-
-def handle_integration_query_save_state(event):
-    """scripts/test_runner 用: S3 最新バージョンと LatestSaveInfo を返す（Regist 権限不要）。"""
-    try:
-        latest = get_s3_latest_save_entry()
-        item = None
-        try:
-            res = factorio_state_table.get_item(Key={'ConfigKey': 'LatestSaveInfo'})
-            raw = res.get('Item')
-            if raw:
-                item = _dynamo_to_json_safe(raw)
-        except Exception as e:
-            print(f"⚠️ LatestSaveInfo get failed: {e}")
-        lm = latest.get('LastModified') if latest else None
-        return {
-            "ok": True,
-            "version_id": latest.get('VersionId') if latest else None,
-            "last_modified": lm.isoformat() if lm else None,
-            "save_info": item,
-        }
-    except Exception as e:
-        print(f"❌ integration_query_save_state: {e}")
-        return {"ok": False, "error": str(e)}
-
-
-def handle_integration_restore_save_state(event):
-    """scripts/test_runner 用: テストで増えた S3 バージョン削除と LatestSaveInfo の巻き戻し。"""
-    data = event.get('data') or {}
-    delete_ids = data.get('delete_version_ids') or []
-    baseline_vid = data.get('baseline_version_id')
-    baseline_save_info = data.get('baseline_save_info')
-    restored = True
-    errors = []
-    s3 = get_client('s3')
-    bucket = config.get('s3_bucket_name')
-    key = config.get('save_file_key')
-    if not bucket or not key:
-        return {"ok": False, "error": "s3_bucket_name or save_file_key missing", "errors": []}
-
-    for vid in reversed(delete_ids):
-        if not vid:
-            continue
-        try:
-            s3.delete_object(Bucket=bucket, Key=key, VersionId=vid)
-            print(f"🧹 Deleted test save version: {vid}")
-        except Exception as e:
-            restored = False
-            errors.append(str(e))
-            print(f"⚠️ Failed to delete test save version {vid}: {e}")
-
-    if baseline_save_info:
-        expr_values = {':ts': baseline_save_info['Timestamp']}
-        update_expr = "set #ts = :ts"
-        expr_names = {'#ts': 'Timestamp'}
-        if 'FileSize' in baseline_save_info:
-            update_expr += ", #sz = :sz"
-            expr_names['#sz'] = 'FileSize'
-            expr_values[':sz'] = baseline_save_info['FileSize']
-        try:
-            factorio_state_table.update_item(
-                Key={'ConfigKey': 'LatestSaveInfo'},
-                UpdateExpression=update_expr,
-                ExpressionAttributeNames=expr_names,
-                ExpressionAttributeValues=expr_values
-            )
-            print("🧹 Restored LatestSaveInfo to baseline.")
-        except Exception as e:
-            restored = False
-            errors.append(str(e))
-            print(f"⚠️ Failed to restore LatestSaveInfo: {e}")
-    else:
-        try:
-            factorio_state_table.delete_item(Key={'ConfigKey': 'LatestSaveInfo'})
-            print("🧹 Removed LatestSaveInfo to match baseline absence.")
-        except Exception as e:
-            restored = False
-            errors.append(str(e))
-            print(f"⚠️ Failed to delete LatestSaveInfo: {e}")
-
-    if baseline_vid:
-        current = get_s3_latest_save_entry()
-        if not current or current.get('VersionId') != baseline_vid:
-            restored = False
-            print("⚠️ Latest S3 save version did not return to baseline.")
-
-    return {"ok": restored, "errors": errors}
-
-
-def handle_integration_detect_startup_failure(event):
-    """
-    scripts/test_runner 用:
-    直近ログから起動後ストレージ確認失敗を検出する。
-    """
-    try:
-        lookback_seconds = int((event.get('data') or {}).get('lookback_seconds', 240))
-    except Exception:
-        lookback_seconds = 240
-
-    function_name = os.getenv('AWS_LAMBDA_FUNCTION_NAME') or config.get('executor_lambda_name') or 'Factorio_Executor'
-    log_group_name = f"/aws/lambda/{function_name}"
-    start_ms = int((time.time() - max(30, lookback_seconds)) * 1000)
-
-    try:
-        logs = get_client('logs')
-        resp = logs.filter_log_events(
-            logGroupName=log_group_name,
-            startTime=start_ms,
-            interleaved=True
-        )
-        hit_messages = []
-        for ev in resp.get('events', []):
-            msg = ev.get('message', '')
-            if (
-                "Startup storage check failed" in msg
-                or "Startup aborted due to storage path check failure" in msg
-                or "ストレージ確認に失敗" in msg
-            ):
-                hit_messages.append(msg)
-        return {
-            "ok": True,
-            "detected": bool(hit_messages),
-            "messages": hit_messages[-10:]
-        }
-    except Exception as e:
-        print(f"⚠️ integration_detect_startup_failure failed: {e}")
-        return {"ok": False, "error": str(e)}
-
 
 def update_latest_save_info(timestamp_iso):
     """最新セーブの時刻とサイズをカタログへ保存する。"""
-    expr_names = {'#ts': 'Timestamp'}
-    expr_values = {':val': timestamp_iso}
-    update_expr = "set #ts = :val"
-
-    try:
-        s3 = get_client('s3')
-        s3_meta = s3.head_object(Bucket=config['s3_bucket_name'], Key=config['save_file_key'])
-        size_mb = round(s3_meta.get('ContentLength', 0) / (1024 * 1024), 1)
-        update_expr += ", #sz = :sz"
-        expr_names['#sz'] = 'FileSize'
-        expr_values[':sz'] = str(size_mb)
-    except Exception as e:
-        print(f"⚠️ Could not fetch save size for LatestSaveInfo update: {e}")
-
-    factorio_state_table.update_item(
-        Key={'ConfigKey': 'LatestSaveInfo'},
-        UpdateExpression=update_expr,
-        ExpressionAttributeNames=expr_names,
-        ExpressionAttributeValues=expr_values
-    )
-
-
-def _infer_env_label():
-    """SSM_PARAMETER_PATH から dev/prod を推定する。"""
-    path = (os.getenv('SSM_PARAMETER_PATH') or '/factorio/').strip().lower()
-    if 'dev' in path:
-        return 'dev'
-    return 'prod'
+    return _update_latest_save_info_impl(config, factorio_state_table, get_client, timestamp_iso)
 
 
 def _run_ssm_shell_and_wait(ssm, instance_id, commands, timeout_seconds=180):
-    """
-    SSM RunShellScript を実行し、完了まで待機する。
-    戻り値: (ok: bool, status: str, stdout: str, stderr: str)
-    """
-    try:
-        sent = ssm.send_command(
-            InstanceIds=[instance_id],
-            DocumentName="AWS-RunShellScript",
-            Parameters={'commands': commands},
-            TimeoutSeconds=timeout_seconds
-        )
-        command_id = sent['Command']['CommandId']
-    except Exception as e:
-        return False, "SendCommandFailed", "", str(e)
-
-    # Lambda timeout を超えにくくするため、待機余裕は最小限にする
-    deadline = time.time() + timeout_seconds + 10
-    while time.time() < deadline:
-        try:
-            inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-            status = inv.get('Status', 'Unknown')
-            if status in ('Success', 'Failed', 'TimedOut', 'Cancelled'):
-                return (
-                    status == 'Success',
-                    status,
-                    (inv.get('StandardOutputContent') or '').strip(),
-                    (inv.get('StandardErrorContent') or '').strip()
-                )
-        except Exception as e:
-            msg = str(e)
-            # Invocation がまだ反映されていない瞬間は再試行
-            if "InvocationDoesNotExist" in msg:
-                pass
-            else:
-                # 権限不足など恒久エラーは待機せず即失敗
-                return False, "GetInvocationFailed", "", msg
-        time.sleep(3)
-
-    return False, "WaitTimeout", "", f"SSM command did not finish within {timeout_seconds + 10}s"
+    return run_ssm_shell_and_wait(ssm, instance_id, commands, timeout_seconds=timeout_seconds)
 
 
 def _resolve_service_unit_name():
-    """
-    停止対象の systemd ユニット名を解決する。
-    優先: SERVICE_UNIT_NAME（SSM経由: service_unit_name）
-    後方互換: 未設定時は従来の候補チェーンを使う。
-    """
-    unit = (config.get('service_unit_name') or '').strip()
-    if unit:
-        return f"sudo systemctl stop {unit}", False
-    return "sudo systemctl stop factorio-dev || sudo systemctl stop factorio-prod || sudo systemctl stop factorio", True
+    return resolve_service_unit_name(config)
 
 
 def _resolve_server_settings_path():
-    """
-    起動前チェックで参照する server-settings ファイルパスを解決する。
-    優先: SERVER_SETTINGS_FILE_NAME（SSM経由: server_settings_file_name）
-    既定: /mnt/factorio-data/config/server-settings.json
-    """
-    file_name = (config.get('server_settings_file_name') or 'server-settings.json').strip()
-    if not file_name:
-        file_name = 'server-settings.json'
-    return f"/mnt/factorio-data/config/{file_name}"
-
-
-def _consume_event_marker(marker_key):
-    """
-    EventBridge の重複配信対策:
-    マーカーを条件付きで削除し、先着 1 実行だけ通知を許可する。
-    """
-    res = factorio_state_table.get_item(Key={'ConfigKey': marker_key})
-    start_time_str = res.get('Item', {}).get('Timestamp')
-    try:
-        factorio_state_table.delete_item(
-            Key={'ConfigKey': marker_key},
-            ConditionExpression="attribute_exists(ConfigKey)"
-        )
-        return True, start_time_str
-    except ClientError as e:
-        code = e.response.get('Error', {}).get('Code', '')
-        if code == 'ConditionalCheckFailedException':
-            return False, start_time_str
-        raise
+    return resolve_server_settings_path(config)
 
 
 def _acquire_start_lock(ttl_seconds=240):
-    """
-    /start 同時実行ガード。
-    - 先着のみロック取得
-    - 異常終了時は ExpiresAt で自然回復
-    """
-    if not factorio_state_table:
-        return True, None
-
-    lock_key = 'StartActionLock'
-    now = int(time.time())
-    token = secrets.token_hex(8)
-    expires_at = now + ttl_seconds
-    try:
-        factorio_state_table.put_item(
-            Item={
-                'ConfigKey': lock_key,
-                'LockToken': token,
-                'Timestamp': str(now),
-                'ExpiresAt': expires_at,
-            },
-            ConditionExpression="attribute_not_exists(ConfigKey) OR ExpiresAt < :now",
-            ExpressionAttributeValues={':now': now},
-        )
-        return True, token
-    except ClientError as e:
-        code = e.response.get('Error', {}).get('Code', '')
-        if code == 'ConditionalCheckFailedException':
-            return False, None
-        raise
+    return acquire_start_lock(factorio_state_table, ttl_seconds)
 
 
 def _release_start_lock(token):
-    if not factorio_state_table or not token:
-        return
-    try:
-        factorio_state_table.delete_item(
-            Key={'ConfigKey': 'StartActionLock'},
-            ConditionExpression="LockToken = :token",
-            ExpressionAttributeValues={':token': token},
-        )
-    except ClientError as e:
-        code = e.response.get('Error', {}).get('Code', '')
-        if code != 'ConditionalCheckFailedException':
-            print(f"⚠️ Failed to release StartActionLock: {e}")
+    return release_start_lock(factorio_state_table, token)
 
 
 def _force_release_start_lock():
-    if not factorio_state_table:
-        return {"ok": False, "error": "DynamoDB not initialized"}
-    try:
-        factorio_state_table.delete_item(Key={'ConfigKey': 'StartActionLock'})
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    return force_release_start_lock(factorio_state_table)
 
 
 def _query_start_lock_state():
-    if not factorio_state_table:
-        return {"ok": False, "error": "DynamoDB not initialized"}
-    try:
-        res = factorio_state_table.get_item(Key={'ConfigKey': 'StartActionLock'})
-        item = res.get('Item')
-        if not item:
-            return {"ok": True, "locked": False}
-        return {
-            "ok": True,
-            "locked": True,
-            "lock_token": item.get('LockToken'),
-            "expires_at": item.get('ExpiresAt'),
-            "timestamp": item.get('Timestamp'),
-        }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    return query_start_lock_state(factorio_state_table)
 
 
 def _ensure_s3files_runtime_paths(ssm, instance_id):
-    """
-    起動後に S3 Files マウントと必須パスを確認する。
-    ID:033 で saves/mods/config を S3 Files 側に寄せるため、RCON待機前に確認する。
-    """
-    server_settings_path = _resolve_server_settings_path()
-    command = (
-        "set -e; "
-        "sudo mkdir -p /mnt/factorio-data /mnt/factorio-data/saves /mnt/factorio-data/mods /mnt/factorio-data/config; "
-        "mountpoint -q /mnt/factorio-data || sudo mount -a; "
-        "mountpoint -q /mnt/factorio-data; "
-        "test -d /mnt/factorio-data/mods; "
-        f"test -f {server_settings_path}"
-    )
-    return _run_ssm_shell_and_wait(ssm, instance_id, [command], timeout_seconds=45)
+    return ensure_s3files_runtime_paths(config, ssm, instance_id)
 
 def init_config():
     try:
@@ -933,81 +618,18 @@ def lambda_handler(event, context):
         if not factorio_state_table:
             return {"ok": False, "error": "DynamoDB not initialized"}
         if action == 'integration_query_save_state':
-            return handle_integration_query_save_state(event)
+            return handle_integration_query_save_state(config, factorio_state_table, get_client)
         if action == 'integration_clear_start_lock':
             return _force_release_start_lock()
         if action == 'integration_query_start_lock':
             return _query_start_lock_state()
         if action == 'integration_detect_startup_failure':
-            return handle_integration_detect_startup_failure(event)
-        return handle_integration_restore_save_state(event)
+            return handle_integration_detect_startup_failure(event, config, get_client)
+        return handle_integration_restore_save_state(event, config, factorio_state_table, get_client)
 
     # EventBridge からの EC2 状態変更通知の処理
     if event.get('source') == 'aws.ec2' and event.get('detail-type') == 'EC2 Instance State-change Notification':
-        detail = event.get('detail', {})
-        instance_id = detail.get('instance-id') or detail.get('instanceId') or ''
-
-        # グローバルテストフラグのチェックを関数化
-        is_suppressed = False
-        if factorio_state_table:
-            res = factorio_state_table.get_item(Key={'ConfigKey': 'TestSessionActive'})
-            if 'Item' in res: is_suppressed = True
-        
-        # state が辞書形式 {'name': 'stopped'} か、文字列 "stopped" かを判定して取得
-        raw_state = detail.get('state')
-        if isinstance(raw_state, dict):
-            state_name = raw_state.get('name')
-        else:
-            state_name = raw_state
-
-        # デバッグログ: 受信したイベントの内容を出力
-        print(f"DEBUG: Received EC2 event for {instance_id} state={state_name}. Expected ID={config.get('instance_id')}")
-
-        # インスタンスIDの比較 (常に正規化して比較)
-        local_id = str(config.get("instance_id") or "").strip().strip("'\"").lower()
-        remote_id = str(instance_id or "").strip().strip("'\"").lower()
-
-        if not local_id:
-            print(f"⚠️ Event ignored: local_id (instance_id) is empty. SSM path: {os.getenv('SSM_PARAMETER_PATH', '/factorio/')} (Config keys: {list(config.keys())})")
-        elif not factorio_state_table:
-            print("❌ Event ignored: factorio_state_table is not initialized. Skipping DB operations.")
-        elif remote_id != local_id:
-            print(f"ℹ️ Event ignored: ID mismatch. Remote={remote_id}, Local={local_id}")
-        else:
-            try:
-                if state_name == 'stopped':
-                    marker_acquired, start_time_str = _consume_event_marker('StopStartTime')
-                    if not marker_acquired:
-                        print("ℹ️ Duplicate stopped event ignored (StopStartTime already consumed).")
-                        return {"status": "duplicate_ignored", "state": "stopped"}
-                    
-                    elapsed_msg = ""
-                    if start_time_str:
-                        elapsed = int(time.time() - float(start_time_str))
-                        elapsed_msg = f" (Total sequence time: {elapsed}s)"
-                    msg = f"🔌 [LOG] EC2 Instance ({instance_id}) has stopped. Shutdown sequence completed.{elapsed_msg}"
-                    if is_suppressed: print(f"🔕 [SILENT MODE] Suppressed Notification: {msg}")
-                    else: notify(msg, mode='log')
-                    return {"status": "ok", "suppressed_msg": msg if is_suppressed else None}
-                elif state_name == 'running':
-                    marker_acquired, start_time_str = _consume_event_marker('StartStartTime')
-                    if not marker_acquired:
-                        print("ℹ️ Duplicate running event ignored (StartStartTime already consumed).")
-                        return {"status": "duplicate_ignored", "state": "running"}
-                    
-                    elapsed_msg = ""
-                    if start_time_str:
-                        elapsed = int(time.time() - float(start_time_str))
-                        elapsed_msg = f" (EC2 boot time: {elapsed}s)"
-                    msg = f"🚀 [LOG] EC2 Instance ({instance_id}) is now running.{elapsed_msg}"
-                    if is_suppressed: print(f"🔕 [SILENT MODE] Suppressed Notification: {msg}")
-                    else: notify(msg, mode='log')
-                    return {"status": "ok", "suppressed_msg": msg if is_suppressed else None}
-            except Exception as e:
-                print(f"❌ Error processing EC2 state change: {e}")
-        
-        # イベント対象外であっても、EventBridgeイベントであるならここで終了させる
-        return {"status": "event_handled_or_ignored"}
+        return handle_ec2_instance_state_event(event, config, factorio_state_table, notify)
 
     locale = event.get('locale', 'ja')
     # 更新(PATCH)対象の判定
