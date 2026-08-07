@@ -9,8 +9,12 @@ from datetime import datetime
 from factorio_common.utils import JST, get_client, fetch_config_from_ssm, run_rcon_command, format_msg, notify_via_lambda
 from integration_handlers import (
     handle_integration_detect_startup_failure,
+    handle_integration_fix_save_permissions,
+    handle_integration_inspect_saves,
     handle_integration_query_save_state,
     handle_integration_restore_save_state,
+    handle_integration_set_server_name,
+    handle_integration_upgrade_factorio,
 )
 from executor_infrastructure import (
     acquire_start_lock,
@@ -21,9 +25,12 @@ from executor_infrastructure import (
     resolve_server_settings_path,
     resolve_service_unit_name,
     run_ssm_shell_and_wait,
+    set_factorio_server_name,
+    start_factorio_service,
+    upgrade_factorio_headless,
     update_latest_save_info as _update_latest_save_info_impl,
 )
-from executor_eventbridge import handle_ec2_instance_state_event
+from executor_eventbridge import handle_ec2_instance_state_event, handle_managed_capacity_signal
 
 def get_msg(category, key, locale='ja', **kwargs):
     return format_msg({}, category, key, locale, **kwargs)
@@ -68,8 +75,342 @@ def _query_start_lock_state():
     return query_start_lock_state(factorio_state_table)
 
 
-def _ensure_s3files_runtime_paths(ssm, instance_id):
-    return ensure_s3files_runtime_paths(config, ssm, instance_id)
+def _ensure_s3files_runtime_paths(ssm, instance_id, timeout_seconds=45):
+    return ensure_s3files_runtime_paths(config, ssm, instance_id, timeout_seconds=timeout_seconds)
+
+
+def _ensure_s3_files_system_id(ssm):
+    """SSM から S3_FILES_SYSTEM_ID を補完する。"""
+    if (config.get('s3_files_system_id') or '').strip():
+        return
+    base_path = (os.getenv('SSM_PARAMETER_PATH') or '/factorio/').strip()
+    if not base_path.endswith('/'):
+        base_path += '/'
+    param_name = f"{base_path}S3_FILES_SYSTEM_ID"
+    try:
+        res = ssm.get_parameter(Name=param_name)
+        value = (res.get('Parameter', {}) or {}).get('Value', '').strip()
+        if value:
+            config['s3_files_system_id'] = value
+    except Exception as e:
+        print(f"⚠️ Failed to fetch S3_FILES_SYSTEM_ID from SSM fallback: {e}")
+
+
+def _get_server_run_mode():
+    """
+    ID:006 で本実装予定の運用モード。
+    現時点では枠組みのみ: STATIC 以外はメンテナンス応答でガードする。
+    """
+    mode = (config.get('server_run_mode') or 'STATIC').strip().upper()
+    return mode if mode else 'STATIC'
+
+
+def _get_dynamic_capacity_mode():
+    mode = (config.get('dynamic_capacity_mode') or 'ONDEMAND').strip().upper()
+    return mode if mode else 'ONDEMAND'
+
+
+def _get_instance_lifecycle_mode():
+    mode = (config.get('instance_lifecycle_mode') or 'PERSISTENT').strip().upper()
+    return mode if mode else 'PERSISTENT'
+
+
+def _get_active_instance_id():
+    """
+    ID:006 用: DYNAMIC で利用中のインスタンスIDを取得する。
+    未設定時は None を返す。
+    """
+    if not factorio_state_table:
+        return None
+    try:
+        res = factorio_state_table.get_item(Key={'ConfigKey': 'ActiveInstanceId'})
+        return (res.get('Item', {}) or {}).get('Value')
+    except Exception as e:
+        print(f"⚠️ Failed to read ActiveInstanceId: {e}")
+        return None
+
+
+def _set_active_instance_id(instance_id, run_mode=None, capacity_mode=None):
+    """
+    ID:006 用: DYNAMIC 実行対象インスタンス情報を保存する。
+    """
+    if not factorio_state_table or not instance_id:
+        return
+    now = datetime.now(JST).isoformat()
+    try:
+        factorio_state_table.put_item(
+            Item={
+                'ConfigKey': 'ActiveInstanceId',
+                'Value': str(instance_id),
+                'RunMode': run_mode or _get_server_run_mode(),
+                'CapacityMode': capacity_mode or _get_dynamic_capacity_mode(),
+                'Timestamp': now,
+            }
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to persist ActiveInstanceId: {e}")
+
+
+def _clear_active_instance_id():
+    if not factorio_state_table:
+        return
+    try:
+        factorio_state_table.delete_item(Key={'ConfigKey': 'ActiveInstanceId'})
+    except Exception as e:
+        print(f"⚠️ Failed to clear ActiveInstanceId: {e}")
+
+
+def _split_csv(raw_value):
+    return [v.strip() for v in str(raw_value or '').split(',') if v.strip()]
+
+
+def _build_dynamic_run_instances_input():
+    """
+    ID:006 用: DYNAMIC 起動用の run_instances 入力を構築する。
+    LaunchTemplate が指定されている場合はそれを優先する。
+    """
+    params = {"MinCount": 1, "MaxCount": 1}
+    launch_template_id = (config.get('launch_template_id') or '').strip()
+    launch_template_version = (config.get('launch_template_version') or '').strip() or '$Latest'
+    if launch_template_id:
+        params["LaunchTemplate"] = {
+            "LaunchTemplateId": launch_template_id,
+            "Version": launch_template_version,
+        }
+    else:
+        image_id = (config.get('base_ami_id') or '').strip()
+        if not image_id:
+            return None, "BASE_AMI_ID or LAUNCH_TEMPLATE_ID is required for SERVER_RUN_MODE=DYNAMIC."
+        params["ImageId"] = image_id
+        params["InstanceType"] = (config.get('instance_type') or 't3.medium').strip()
+
+        subnet_id = (config.get('subnet_id') or '').strip()
+        if subnet_id:
+            params["SubnetId"] = subnet_id
+        security_group_ids = _split_csv(config.get('security_group_ids'))
+        if security_group_ids:
+            params["SecurityGroupIds"] = security_group_ids
+
+        key_name = (config.get('key_name') or '').strip()
+        if key_name:
+            params["KeyName"] = key_name
+        profile_name = (config.get('ec2_instance_profile_name') or '').strip()
+        if profile_name:
+            params["IamInstanceProfile"] = {"Name": profile_name}
+
+    if _get_dynamic_capacity_mode() == 'SPOT':
+        params["InstanceMarketOptions"] = {
+            "MarketType": "spot",
+            "SpotOptions": {
+                "SpotInstanceType": "one-time",
+                "InstanceInterruptionBehavior": "terminate"
+            }
+        }
+    return params, None
+
+
+def _create_dynamic_instance(locale, ec2):
+    params, build_error = _build_dynamic_run_instances_input()
+    if build_error:
+        return None, (
+            f"⚠️ DYNAMIC起動設定が不足しています: {build_error}"
+            if locale == 'ja'
+            else f"⚠️ Missing DYNAMIC launch settings: {build_error}"
+        )
+    try:
+        resp = ec2.run_instances(**params)
+        instances = resp.get('Instances') or []
+        if not instances:
+            return None, (
+                "⚠️ DYNAMIC起動に失敗しました（instance作成結果が空です）。"
+                if locale == 'ja'
+                else "⚠️ Failed to create DYNAMIC instance (empty result)."
+            )
+        instance_id = instances[0].get('InstanceId')
+        if not instance_id:
+            return None, (
+                "⚠️ DYNAMIC起動に失敗しました（InstanceIdが取得できません）。"
+                if locale == 'ja'
+                else "⚠️ Failed to create DYNAMIC instance (missing InstanceId)."
+            )
+        _set_active_instance_id(
+            instance_id,
+            run_mode='DYNAMIC',
+            capacity_mode=_get_dynamic_capacity_mode()
+        )
+        print(f"ℹ️ DYNAMIC instance created: {instance_id}")
+        _sync_ec2_state_rule_target_instance(instance_id)
+        return instance_id, None
+    except Exception as e:
+        print(f"❌ DYNAMIC run_instances failed: {e}")
+        return None, (
+            f"⚠️ DYNAMIC起動に失敗しました。設定とIAM権限を確認してください。({e})"
+            if locale == 'ja'
+            else f"⚠️ Failed to start in DYNAMIC mode. Check settings and IAM permissions. ({e})"
+        )
+
+
+def _sync_ec2_state_rule_target_instance(instance_id):
+    """
+    ID:006 用: DYNAMIC 起動後に EventBridge EC2 state-change ルールの
+    監視対象 instance-id を最新の ActiveInstanceId へ追従させる。
+    """
+    if not instance_id:
+        return False
+
+    region = (config.get('region') or os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-northeast-1').strip()
+    env_label = 'dev' if 'dev' in (os.getenv('SSM_PARAMETER_PATH') or '').lower() else 'prod'
+    suffix = '-dev' if env_label == 'dev' else ''
+    rule_name = (config.get('ec2_state_rule_name') or f'Factorio-EC2StateChange{suffix}').strip()
+    executor_lambda_name = (config.get('executor_lambda_name') or os.getenv('AWS_LAMBDA_FUNCTION_NAME') or '').strip()
+    if not executor_lambda_name:
+        print("⚠️ Skip EventBridge rule sync: executor_lambda_name is empty.")
+        return False
+
+    events = get_client('events')
+    awslambda = get_client('lambda')
+    sts = get_client('sts')
+    account_id = sts.get_caller_identity().get('Account')
+    role_name = (config.get('eventbridge_role_name') or f'FactorioEventBridgeRole{suffix}').strip()
+    role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
+    target_arn = f"arn:aws:lambda:{region}:{account_id}:function:{executor_lambda_name}"
+    new_pattern = {
+        "source": ["aws.ec2"],
+        "detail-type": ["EC2 Instance State-change Notification"],
+        "detail": {
+            "instance-id": [instance_id],
+            "state": sorted(["running", "stopped", "terminated"])
+        }
+    }
+
+    try:
+        current_state = 'ENABLED'
+        try:
+            current_rule = events.describe_rule(Name=rule_name)
+            current_state = current_rule.get('State', 'ENABLED')
+        except Exception:
+            pass
+
+        events.put_rule(
+            Name=rule_name,
+            EventPattern=json.dumps(new_pattern),
+            State=current_state
+        )
+        events.put_targets(
+            Rule=rule_name,
+            Targets=[{'Id': '1', 'Arn': target_arn, 'RoleArn': role_arn}]
+        )
+        print(f"ℹ️ EventBridge rule synced for dynamic instance: rule={rule_name} instance={instance_id}")
+
+        # ルール新規作成時の invoke 権限不足を避けるため、必要なら追加（既存ならスキップ）
+        statement_id = f"AllowEventBridgeNotify-{env_label}"
+        rule_arn = f"arn:aws:events:{region}:{account_id}:rule/{rule_name}"
+        try:
+            policy_resp = awslambda.get_policy(FunctionName=executor_lambda_name)
+            policy_dict = json.loads(policy_resp['Policy'])
+            already = False
+            for stmt in policy_dict.get('Statement', []):
+                sid = stmt.get('Sid')
+                src = (stmt.get('Condition', {}).get('ArnLike', {}) or {}).get('AWS:SourceArn')
+                if sid in [statement_id, f"AlllowEventBridgeNotify-{env_label}"] and src == rule_arn:
+                    already = True
+                    break
+            if not already:
+                awslambda.add_permission(
+                    FunctionName=executor_lambda_name,
+                    StatementId=statement_id,
+                    Action='lambda:InvokeFunction',
+                    Principal='events.amazonaws.com',
+                    SourceArn=rule_arn
+                )
+        except Exception as e:
+            # 既存衝突・権限不足は起動自体の致命傷にしない
+            print(f"⚠️ EventBridge invoke permission check/add skipped: {e}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to sync EventBridge EC2 state rule for dynamic instance: {e}")
+        return False
+
+
+# ID:091: EC2 操作が不要なコマンドは instance 未解決でもハンドラへ進める
+_OFFLINE_OK_ACTIONS = frozenset({'status', 'pass', 'license'})
+
+
+def _resolve_instance_id_for_action(action, locale, ec2):
+    """
+    ID:006 用: 実行対象インスタンスIDを運用モードに応じて解決する。
+    戻り値: (instance_id | None, error_message | None)
+    ID:091: status/pass/license は instance_id=None を許す（error なし）。
+    """
+    run_mode = _get_server_run_mode()
+    offline_ok = action in _OFFLINE_OK_ACTIONS
+
+    if run_mode == 'STATIC':
+        instance_id = (config.get('instance_id') or '').strip().strip("'\"")
+        if not instance_id:
+            print(f"❌ INSTANCE_ID is missing. SSM_PARAMETER_PATH={os.getenv('SSM_PARAMETER_PATH', '/factorio/')}")
+            if offline_ok:
+                return None, None
+            return None, "❌ サーバー設定の取得に失敗しました。管理者に設定内容の確認を依頼してください。"
+        return instance_id, None
+
+    if action == 'start':
+        active_instance_id = (_get_active_instance_id() or '').strip()
+        if active_instance_id:
+            return active_instance_id, None
+        return _create_dynamic_instance(locale, ec2)
+
+    active_instance_id = (_get_active_instance_id() or '').strip()
+    if not active_instance_id:
+        if offline_ok:
+            return None, None
+        return None, get_msg("common", "server_offline", locale)
+    return active_instance_id, None
+
+
+def _integration_query_target_instance(event, ec2):
+    """test_runner 用: 実行対象インスタンスIDと状態を返す。"""
+    data = event.get('data', {}) if isinstance(event, dict) else {}
+    prefer_active = bool(data.get('prefer_active', False))
+    run_mode = _get_server_run_mode()
+    env_instance_id = (config.get('instance_id') or '').strip().strip("'\"")
+    active_instance_id = (_get_active_instance_id() or '').strip()
+
+    target_instance_id = None
+    source = 'none'
+    if run_mode == 'DYNAMIC' or prefer_active:
+        if active_instance_id:
+            target_instance_id = active_instance_id
+            source = 'active'
+        elif env_instance_id and run_mode != 'DYNAMIC':
+            target_instance_id = env_instance_id
+            source = 'env'
+    elif env_instance_id:
+        target_instance_id = env_instance_id
+        source = 'env'
+
+    if not target_instance_id:
+        return {"ok": True, "instance_id": None, "state": None, "source": source, "run_mode": run_mode}
+
+    try:
+        inst = ec2.describe_instances(InstanceIds=[target_instance_id])['Reservations'][0]['Instances'][0]
+        return {
+            "ok": True,
+            "instance_id": target_instance_id,
+            "state": inst.get('State', {}).get('Name'),
+            "source": source,
+            "run_mode": run_mode
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "instance_id": target_instance_id,
+            "state": None,
+            "source": source,
+            "run_mode": run_mode,
+            "error": str(e)
+        }
+
 
 def init_config():
     try:
@@ -232,6 +573,7 @@ def handle_status(event, ec2, inst, state, ip, locale):
 
 def handle_start(event, ec2, inst, state, ip, locale):
         # TODO ID:006: SERVER_RUN_MODE=STATIC/DYNAMICで起動方式を分岐し、DYNAMIC時は起動テンプレート(run_instances)で作成したInstanceIdをセッション管理へ保存する
+        target_instance_id = inst.get('InstanceId') or (config.get('instance_id') or '').strip().strip("'\"")
         if config.get("test_mode"):
             _force_release_start_lock()
         start_lock_acquired, start_lock_token = _acquire_start_lock()
@@ -241,7 +583,28 @@ def handle_start(event, ec2, inst, state, ip, locale):
             return get_msg("start", "already", locale)
 
         try:
-            if state == 'stopped':
+            run_mode = _get_server_run_mode()
+            can_start_flow = state == 'stopped' or (run_mode == 'DYNAMIC' and state in ('pending', 'running'))
+            if can_start_flow:
+                phase_started_at = time.time()
+                timing = {
+                    "start_invoke_to_ready_seconds": 0.0,
+                    "ec2_boot_wait_seconds": 0.0,
+                    "storage_check_seconds": 0.0,
+                    "rcon_ready_wait_seconds": 0.0,
+                }
+
+                def _emit_start_timing(stage):
+                    timing["start_invoke_to_ready_seconds"] = round(time.time() - phase_started_at, 2)
+                    print(
+                        "⏱️ START_TIMING "
+                        f"stage={stage} "
+                        f"total={timing['start_invoke_to_ready_seconds']}s "
+                        f"ec2_boot_wait={round(timing['ec2_boot_wait_seconds'], 2)}s "
+                        f"storage_check={round(timing['storage_check_seconds'], 2)}s "
+                        f"rcon_wait={round(timing['rcon_ready_wait_seconds'], 2)}s"
+                    )
+
                 # 1. パスワードの取得または生成
                 # SSMにあるのは「設定（固定か空か）」、DynamoDBに保存するのが「現在のセッション用」と分離します
                 new_pwd = (config.get('game_password') or "").strip("'\" ")
@@ -266,6 +629,10 @@ def handle_start(event, ec2, inst, state, ip, locale):
                 start_process_time = time.time()
                 # 以前の停止処理マーカーが残っている可能性があるため強制削除
                 factorio_state_table.delete_item(Key={'ConfigKey': 'StopStartTime'})
+                try:
+                    factorio_state_table.delete_item(Key={'ConfigKey': 'StopTargetInstanceId'})
+                except Exception:
+                    pass
 
                 # 各種カウントをリセット
                 try:
@@ -292,24 +659,84 @@ def handle_start(event, ec2, inst, state, ip, locale):
                     ExpressionAttributeValues={':val': str(start_process_time)}
                 )
 
-                ec2.start_instances(InstanceIds=[config['instance_id']])
+                if state == 'stopped':
+                    boot_wait_started_at = time.time()
+                    ec2.start_instances(InstanceIds=[target_instance_id])
+                    timing["ec2_boot_wait_seconds"] += time.time() - boot_wait_started_at
                 ssm = get_client('ssm')
+                _ensure_s3_files_system_id(ssm)
                 runtime_paths_ready = False
                 runtime_check_error_logged = False
+                service_start_attempted = False
                 
                 # 内部仕様: 起動完了までポーリング待機 (Lambdaタイムアウトに注意)
                 # RCONが通る＝ゲームプロセス起動完了とみなす
+                # ID:087: max_attempts 固定打ち切りではなく予算＋安全上限制、終了時は timeout メッセージを返す
                 time.sleep(10) # 起動直後の待機
-                max_attempts = int(config.get('rcon_ready_check_max_attempts', 12))
-                interval = int(config.get('rcon_ready_check_interval_seconds', 10))
+                test_mode = bool(config.get("test_mode"))
+                max_attempts = int(
+                    config.get('rcon_ready_check_max_attempts', 12 if test_mode else 48)
+                )
+                interval = int(
+                    config.get('rcon_ready_check_interval_seconds', 5 if test_mode else 5)
+                )
+                # ID:080 test_mode では同期呼び出しが長時間ブロックしないよう予算を短縮する
+                start_wait_budget_seconds = int(
+                    config.get('start_ready_wait_budget_seconds', 85 if test_mode else 240)
+                )
+                # Lambda 残り時間と整合（通知・ロック解放用に 20 秒を確保）
+                remaining_fn = config.get('_context_remaining_fn')
+                if callable(remaining_fn):
+                    try:
+                        rem_s = max(30, int(remaining_fn() // 1000) - 20)
+                        if rem_s < start_wait_budget_seconds:
+                            print(
+                                f"ℹ️ Clamping start wait budget to Lambda remaining headroom: "
+                                f"{start_wait_budget_seconds}s -> {rem_s}s"
+                            )
+                            start_wait_budget_seconds = rem_s
+                    except Exception as e:
+                        print(f"⚠️ Failed to read Lambda remaining time for start budget: {e}")
+                runtime_check_timeout_seconds = int(
+                    config.get('startup_storage_check_timeout_seconds', 20 if test_mode else 45)
+                )
+                runtime_check_timeout_seconds = max(30, runtime_check_timeout_seconds)
+                start_wait_deadline = time.time() + max(30, start_wait_budget_seconds)
                 
-                for _ in range(max_attempts):
+                attempt = 0
+                while True:
+                    attempt += 1
+                    remaining_budget = start_wait_deadline - time.time()
+                    if remaining_budget <= 0:
+                        print("⚠️ Start wait budget exceeded before runtime path/RCON became ready.")
+                        break
+                    if attempt > max_attempts:
+                        print(f"⚠️ Start wait max attempts exceeded ({max_attempts}).")
+                        break
+                    if callable(remaining_fn):
+                        try:
+                            if remaining_fn() < 20000:
+                                print("⚠️ Lambda remaining time low; ending start wait for notify/cleanup.")
+                                break
+                        except Exception:
+                            pass
                     # IPがまだ取れない場合があるため再取得
-                    inst_refresh = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
+                    inst_refresh = ec2.describe_instances(InstanceIds=[target_instance_id])['Reservations'][0]['Instances'][0]
                     current_ip = inst_refresh.get('PublicIpAddress')
                     if current_ip:
                         if not runtime_paths_ready:
-                            ready_ok, ready_status, ready_out, ready_err = _ensure_s3files_runtime_paths(ssm, config['instance_id'])
+                            # 予算内でのみ SSM 確認を実施（test_mode での90秒超過を防ぐ）
+                            runtime_timeout = min(
+                                runtime_check_timeout_seconds,
+                                max(30, int(remaining_budget) - 1)
+                            )
+                            storage_check_started_at = time.time()
+                            ready_ok, ready_status, ready_out, ready_err = _ensure_s3files_runtime_paths(
+                                ssm,
+                                target_instance_id,
+                                timeout_seconds=runtime_timeout
+                            )
+                            timing["storage_check_seconds"] += time.time() - storage_check_started_at
                             if not ready_ok:
                                 print(f"⚠️ Runtime path check failed before RCON. status={ready_status} stderr={ready_err}")
                                 if ready_out:
@@ -329,10 +756,79 @@ def handle_start(event, ec2, inst, state, ip, locale):
                                         mode='log'
                                     )
                                     runtime_check_error_logged = True
-                                time.sleep(interval)
+                                post_check_remaining = start_wait_deadline - time.time()
+                                if post_check_remaining <= 0:
+                                    print("⚠️ Start wait budget exceeded after runtime path check failure.")
+                                    break
+                                time.sleep(min(interval, max(1, int(post_check_remaining))))
                                 continue
                             runtime_paths_ready = True
+
+                        # ID:088: FACTORIO_VERSION が具体版のとき不一致なら headless を更新
+                        # （stable は起動毎のダウンロードを避けるため force なしではスキップ）
+                        target_ver = (config.get('factorio_version') or '').strip()
+                        if target_ver and target_ver.lower() != 'stable':
+                            up_timeout = min(180, max(30, int(start_wait_deadline - time.time()) - 30))
+                            if up_timeout >= 60:
+                                up_ok, up_status, up_out, up_err, up_skip = upgrade_factorio_headless(
+                                    config,
+                                    ssm,
+                                    target_instance_id,
+                                    run_fn=_run_ssm_shell_and_wait,
+                                    timeout_seconds=up_timeout,
+                                    force=False,
+                                    restart=False,
+                                )
+                                if up_out:
+                                    print(f"ℹ️ Factorio version check: {up_out}")
+                                if not up_ok and not up_skip:
+                                    print(f"⚠️ Factorio headless upgrade failed. status={up_status} stderr={up_err}")
+                                    notify(
+                                        f"⚠️ [LOG] Factorio headless upgrade failed. status={up_status} stderr={up_err}",
+                                        mode='log'
+                                    )
+                            else:
+                                print("⚠️ Skipping version check: insufficient start-wait budget.")
+
+                        # ID:087: マウント/設定確認後にユニットを明示起動（AMI の auto-start 漏れを吸収）
+                        if not service_start_attempted:
+                            rem_for_svc = int(start_wait_deadline - time.time()) - 1
+                            if rem_for_svc < 15:
+                                print("⚠️ Skipping systemctl start: insufficient start-wait budget remaining.")
+                                service_start_attempted = True
+                            else:
+                                service_start_attempted = True
+                                svc_timeout = min(45, max(15, rem_for_svc))
+                                svc_ok, svc_status, svc_out, svc_err, svc_fallback = start_factorio_service(
+                                    config,
+                                    ssm,
+                                    target_instance_id,
+                                    run_fn=_run_ssm_shell_and_wait,
+                                    timeout_seconds=svc_timeout
+                                )
+                                if svc_fallback:
+                                    notify(
+                                        "⚠️ [LOG] SERVICE_UNIT_NAME is not set. "
+                                        "Using fallback service chain (factorio-prod/dev/default) for start.",
+                                        mode='log'
+                                    )
+                                if svc_out:
+                                    print(f"ℹ️ Factorio service start output: {svc_out}")
+                                if not svc_ok:
+                                    print(
+                                        f"⚠️ Factorio service start failed. status={svc_status} stderr={svc_err}"
+                                    )
+                                    notify(
+                                        f"⚠️ [LOG] Failed to start Factorio service after storage check. "
+                                        f"status={svc_status} stderr={svc_err}",
+                                        mode='log'
+                                    )
+                                else:
+                                    print("ℹ️ Factorio service start issued successfully.")
+
+                        rcon_wait_started_at = time.time()
                         check = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], "/version")
+                        timing["rcon_ready_wait_seconds"] += time.time() - rcon_wait_started_at
                         if "Error" not in check:
                             # 3. 起動完了後、RCON経由でゲーム内パスワードを適用
                             pwd_res = run_rcon_command(current_ip, config['rcon_port'], config['rcon_password'], f"/config set password {new_pwd}")
@@ -343,6 +839,12 @@ def handle_start(event, ec2, inst, state, ip, locale):
                             
                             elapsed = int(time.time() - start_process_time)
                             notify(f"🚀 [LOG] Factorio server is ready (Time: {elapsed}s)", mode='log')
+                            _emit_start_timing("ready")
+                            _set_active_instance_id(
+                                target_instance_id,
+                                run_mode=_get_server_run_mode(),
+                                capacity_mode=_get_dynamic_capacity_mode()
+                            )
                             
                             # 起動が確認できたので、ステータス表示用の起動マーカーを削除
                             factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
@@ -356,27 +858,44 @@ def handle_start(event, ec2, inst, state, ip, locale):
                                     "color": COLOR_GREEN
                                 }]
                             }
-                    time.sleep(interval)
+                    remaining_after_loop = start_wait_deadline - time.time()
+                    if remaining_after_loop <= 0:
+                        print("⚠️ Start wait budget exceeded while waiting next retry interval.")
+                        break
+                    time.sleep(min(interval, max(1, int(remaining_after_loop))))
 
                 if not runtime_paths_ready:
+                    _emit_start_timing("storage_check_failed")
                     factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
                     server_settings_path = _resolve_server_settings_path()
                     notify(
-                        "⚠️ [LOG] Startup aborted due to storage path check failure. Please verify S3 Files mount and config path.",
+                        (
+                            "⚠️ [LOG] Startup aborted due to storage path check failure or readiness timeout. "
+                            "Please verify S3 Files mount and config path."
+                        ),
                         mode='log'
                     )
                     return (
-                        f"⚠️ 起動後のストレージ確認に失敗しました。管理者にログチャットの確認と、S3 Files のマウントおよび {server_settings_path} の設定確認を依頼してください。"
+                        f"⚠️ 起動後のストレージ確認に失敗、または準備待機がタイムアウトしました。管理者にログチャットの確認と、S3 Files のマウントおよび {server_settings_path} の設定確認を依頼してください。"
                         if locale == 'ja'
-                        else f"⚠️ Startup storage check failed. Please ask an administrator to review the log chat and verify S3 Files mount plus {server_settings_path}."
+                        else f"⚠️ Startup storage check failed or readiness wait timed out. Please ask an administrator to review the log chat and verify S3 Files mount plus {server_settings_path}."
                     )
-                return get_msg("start", "success", locale)
+                # ID:087: RCON 未達は success と見せず timeout として通知（StartStartTime もクリア）
+                _emit_start_timing("rcon_ready_timeout")
+                factorio_state_table.delete_item(Key={'ConfigKey': 'StartStartTime'})
+                notify(
+                    "⚠️ [LOG] Startup wait timed out before RCON became ready. "
+                    "EC2 may be running while Factorio service is not yet responsive.",
+                    mode='log'
+                )
+                return get_msg("start", "timeout", locale)
             return get_msg("start", "already", locale)
         finally:
             _release_start_lock(start_lock_token)
 
 def handle_stop(event, ec2, inst, state, ip, locale):
         # TODO ID:006: SERVER_RUN_MODE=STATICはstop_instances、DYNAMICはterminate_instancesへ分岐し、終了対象InstanceIdをセッション情報から解決する
+        target_instance_id = inst.get('InstanceId') or (config.get('instance_id') or '').strip().strip("'\"")
         if state == 'running':
             start_stop_time = time.time()
 
@@ -419,7 +938,7 @@ def handle_stop(event, ec2, inst, state, ip, locale):
             )
             stop_ok, stop_status, stop_out, stop_err = _run_ssm_shell_and_wait(
                 ssm,
-                config['instance_id'],
+                target_instance_id,
                 [stop_poll_command],
                 timeout_seconds=75
             )
@@ -462,14 +981,14 @@ def handle_stop(event, ec2, inst, state, ip, locale):
                     "JST_TS=$(TZ=Asia/Tokyo date +%Y-%m-%dT%H:%M:%S%z) && "
                     "JST_DATE=$(TZ=Asia/Tokyo date +%F) && "
                     "printf '{\"session_id\":\"%s\",\"utc_timestamp\":\"%s\",\"jst_timestamp\":\"%s\",\"utc_date\":\"%s\",\"jst_date\":\"%s\",\"instance_id\":\"%s\"}\\n' "
-                    f"\"$SESSION_ID\" \"$UTC_TS\" \"$JST_TS\" \"$LOG_DATE\" \"$JST_DATE\" \"{config['instance_id']}\" > /tmp/session-${{SESSION_ID}}.json && "
+                    f"\"$SESSION_ID\" \"$UTC_TS\" \"$JST_TS\" \"$LOG_DATE\" \"$JST_DATE\" \"{target_instance_id}\" > /tmp/session-${{SESSION_ID}}.json && "
                     "aws s3 cp /tmp/session-${SESSION_ID}.json \"${DEST}session-${SESSION_ID}.json\" >/dev/null && "
                     "rm -f /tmp/session-${SESSION_ID}.json && "
                     "if [ \"$SYNCED\" -ne 1 ]; then echo \"no factorio-*.log found\"; fi"
                 )
                 sync_ok, sync_status, sync_out, sync_err = _run_ssm_shell_and_wait(
                     ssm,
-                    config['instance_id'],
+                    target_instance_id,
                     [sync_cmd],
                     timeout_seconds=70
                 )
@@ -488,13 +1007,31 @@ def handle_stop(event, ec2, inst, state, ip, locale):
             time.sleep(5)
             _run_ssm_shell_and_wait(
                 ssm,
-                config['instance_id'],
+                target_instance_id,
                 ["sudo umount /mnt/factorio-data || true"],
                 timeout_seconds=20
             )
             
-            # 6. EC2停止
-            ec2.stop_instances(InstanceIds=[config['instance_id']])
+            # 6. EC2停止/終了
+            run_mode = _get_server_run_mode()
+            lifecycle_mode = _get_instance_lifecycle_mode()
+            # ID:090: EventBridge 照合用に停止対象 ID を残す（terminate 後も消費可能）
+            try:
+                factorio_state_table.put_item(
+                    Item={
+                        'ConfigKey': 'StopTargetInstanceId',
+                        'Value': str(target_instance_id),
+                        'Timestamp': str(start_stop_time),
+                    }
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to persist StopTargetInstanceId: {e}")
+
+            if run_mode == 'DYNAMIC' and lifecycle_mode == 'EPHEMERAL':
+                ec2.terminate_instances(InstanceIds=[target_instance_id])
+                # ActiveInstanceId は terminated イベント側で掃除（ID 照合のため残す）
+            else:
+                ec2.stop_instances(InstanceIds=[target_instance_id])
             
             # 7. セッションパスワードのクリア
             try:
@@ -522,18 +1059,7 @@ def handle_save(event, ec2, inst, state, ip, locale):
         return get_msg("save", "success", locale)
 
 def handle_pass(event, ec2, inst, state, ip, locale):
-    # 1. 停止中、または停止処理中の判定
-    if state == 'stopped':
-        return get_msg("common", "server_offline", locale)
-
-    try:
-        # インスタンスが動いていても、停止マーカーがある場合はオフライン扱いにする
-        res_stop = factorio_state_table.get_item(Key={'ConfigKey': 'StopStartTime'})
-        if 'Item' in res_stop:
-            return get_msg("common", "server_offline", locale)
-    except: pass
-
-    # 2. DynamoDBから「現在のセッションで有効なパスワード」を取得する
+    # ID:091: EC2 停止中でも実行可。セッション PW が無ければ not_set（stop で ActivePassword は消える）。
     try:
         res = factorio_state_table.get_item(Key={'ConfigKey': 'ActivePassword'})
         pwd = res.get('Item', {}).get('Value')
@@ -545,13 +1071,13 @@ def handle_pass(event, ec2, inst, state, ip, locale):
     if not pwd:
         return get_msg("pass", "not_set", locale)
 
-    # 3. 起動処理中の判定
+    # 起動処理中はパスワードを出しつつ準備中を伝える
     try:
         res_start = factorio_state_table.get_item(Key={'ConfigKey': 'StartStartTime'})
         if 'Item' in res_start:
-            # パスワードは表示しつつ、準備中であることを伝える
             return get_msg("pass", "starting", locale, pwd=pwd)
-    except: pass
+    except Exception:
+        pass
 
     return get_msg("pass", "display", locale, pwd=pwd)
 
@@ -577,21 +1103,34 @@ ACTION_HANDLERS = {
 
 def execute_ec2_command(action, event):
     locale = event.get('locale', 'ja')
-    ec2 = get_client('ec2')
-    instance_id = (config.get('instance_id') or '').strip().strip("'\"")
-    if not instance_id:
-        print(f"❌ INSTANCE_ID is missing. SSM_PARAMETER_PATH={os.getenv('SSM_PARAMETER_PATH', '/factorio/')}")
-        # TODO ID:031: 設定不備エラーのユーザー向け応答を locale に応じて日本語/英語で返す
-        return "❌ サーバー設定の取得に失敗しました。管理者に設定内容の確認を依頼してください。"
-    # TODO ID:006: DYNAMIC対応時は固定config['instance_id']前提を廃止し、現在アクティブなInstanceIdをDynamoDB等から解決する
-    inst = ec2.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
-    state = inst['State']['Name']
-    ip = inst.get('PublicIpAddress')
-
     handler = ACTION_HANDLERS.get(action)
-    if handler:
-        return handler(event, ec2, inst, state, ip, locale)
-    return get_msg("common", "unknown_cmd", locale)
+    if not handler:
+        return get_msg("common", "unknown_cmd", locale)
+
+    # ID:091: license は EC2 に依存しない
+    if action == 'license':
+        return handler(event, None, {}, 'stopped', None, locale)
+
+    ec2 = get_client('ec2')
+    instance_id, resolve_error = _resolve_instance_id_for_action(action, locale, ec2)
+    if resolve_error:
+        return resolve_error
+
+    # instance 未解決でも offline 可コマンドは停止相当でハンドラ実行
+    if not instance_id:
+        return handler(event, ec2, {}, 'stopped', None, locale)
+
+    try:
+        inst = ec2.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
+        state = inst['State']['Name']
+        ip = inst.get('PublicIpAddress')
+    except Exception as e:
+        print(f"⚠️ describe_instances failed for {instance_id}: {e}")
+        if action in _OFFLINE_OK_ACTIONS:
+            return handler(event, ec2, {}, 'stopped', None, locale)
+        return get_msg("common", "server_offline", locale)
+
+    return handler(event, ec2, inst, state, ip, locale)
 
 def lambda_handler(event, context):
     if not config["initialized"]: init_config()
@@ -604,6 +1143,11 @@ def lambda_handler(event, context):
     test_mode = event.get('test_mode', False)
     config["test_mode"] = test_mode
     config["start_lock_denied"] = False
+    # ID:087: 起動待機予算を Lambda 残り時間に合わせてクランプするために保持
+    if context is not None and hasattr(context, "get_remaining_time_in_millis"):
+        config["_context_remaining_fn"] = context.get_remaining_time_in_millis
+    else:
+        config["_context_remaining_fn"] = None
 
     # scripts/test_runner 用: S3 状態の参照・巻き戻し（Executor ロールで実行。Regist に S3 削除権限を広げない）
     if action in (
@@ -611,7 +1155,12 @@ def lambda_handler(event, context):
         'integration_restore_save_state',
         'integration_clear_start_lock',
         'integration_query_start_lock',
-        'integration_detect_startup_failure'
+        'integration_detect_startup_failure',
+        'integration_query_target_instance',
+        'integration_upgrade_factorio',
+        'integration_set_server_name',
+        'integration_inspect_saves',
+        'integration_fix_save_permissions',
     ):
         if not test_mode:
             return {"ok": False, "error": "test_mode is required"}
@@ -625,7 +1174,55 @@ def lambda_handler(event, context):
             return _query_start_lock_state()
         if action == 'integration_detect_startup_failure':
             return handle_integration_detect_startup_failure(event, config, get_client)
+        if action == 'integration_query_target_instance':
+            return _integration_query_target_instance(event, get_client('ec2'))
+        if action == 'integration_upgrade_factorio':
+            return handle_integration_upgrade_factorio(
+                event,
+                config,
+                get_client,
+                factorio_state_table,
+                upgrade_factorio_headless,
+            )
+        if action == 'integration_set_server_name':
+            return handle_integration_set_server_name(
+                event,
+                config,
+                get_client,
+                factorio_state_table,
+                set_factorio_server_name,
+            )
+        if action == 'integration_inspect_saves':
+            return handle_integration_inspect_saves(
+                event,
+                config,
+                get_client,
+                factorio_state_table,
+                _run_ssm_shell_and_wait,
+            )
+        if action == 'integration_fix_save_permissions':
+            return handle_integration_fix_save_permissions(
+                event,
+                config,
+                get_client,
+                factorio_state_table,
+                _run_ssm_shell_and_wait,
+            )
         return handle_integration_restore_save_state(event, config, factorio_state_table, get_client)
+
+    # EventBridge: Spot 中断警告 / Rebalance（ID:068 の第一段階）
+    if event.get('source') == 'aws.ec2' and event.get('detail-type') in (
+        'EC2 Spot Instance Interruption Warning',
+        'EC2 Instance Rebalance Recommendation',
+    ):
+        return handle_managed_capacity_signal(
+            event,
+            config,
+            factorio_state_table,
+            notify,
+            get_client,
+            run_rcon_command
+        )
 
     # EventBridge からの EC2 状態変更通知の処理
     if event.get('source') == 'aws.ec2' and event.get('detail-type') == 'EC2 Instance State-change Notification':
@@ -641,7 +1238,7 @@ def lambda_handler(event, context):
     debug_state = None
     try:
         ec2_dbg = get_client('ec2')
-        dbg_instance_id = (config.get('instance_id') or '').strip().strip("'\"")
+        dbg_instance_id = (_get_active_instance_id() or config.get('instance_id') or '').strip().strip("'\"")
         if dbg_instance_id:
             dbg_inst = ec2_dbg.describe_instances(InstanceIds=[dbg_instance_id])['Reservations'][0]['Instances'][0]
             debug_instance_id = dbg_instance_id

@@ -71,11 +71,11 @@ def main():
     # ステップのニックネームとスクリプトパスのマッピング
     all_scripts = [
         ("config", "scripts/setup_config.py"),
+        ("register", "scripts/register.py"),
         ("policies", "scripts/deploy_policies.py"),
         ("init", "scripts/init_aws_resources.py"),
         ("layer", "scripts/update_layer.py"),
         ("lambda", "scripts/deploy_lambda.py"),
-        ("register", "scripts/register.py"),
         ("eventbridge", "scripts/update_eventbridge.py"),
         ("test", "scripts/test_runner.py")
     ]

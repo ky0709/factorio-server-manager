@@ -48,7 +48,7 @@
     ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Worker/lambda_function.py, scripts/register.py, scripts/check_env_leaks.py, .env.example, README.md, aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioWorkPolicy/policy.json.example
     ・背景: 固定インスタンスの起動停止運用を維持しつつ、起動テンプレート経由の新規作成（spot/ondemand）と終了を切り替え可能にし、運用コストと可用性の選択肢を持たせる必要があるため。Executor が肥大化しているため、**ID:039 で同一 Lambda 内モジュール分割を先行**し、その境界に沿ってハイブリッド分岐を載せる（巨大関数への if 積み増しを避ける）。
     ・完了条件: `SERVER_RUN_MODE`（`STATIC`/`DYNAMIC`）・`DYNAMIC_CAPACITY_MODE`（`ONDEMAND`/`SPOT`）・`INSTANCE_LIFECYCLE_MODE`（`PERSISTENT`/`EPHEMERAL`）を使った分岐方針、起動テンプレート利用時の run/terminate フロー、アクティブInstanceIdの保持先（DynamoDB等）、Spot中断時の退避方針、必要IAM権限の差分、実装着手手順（ブランチ作成開始を含む）がコード内TODOとTASKS.mdから追跡可能になっていること。**ID:039 完了後に本ロジックを実装**し、稼働検証後に **ID:040** で Lambda 物理分割の要否を判断すること。
-    ・メモ（後対応）: `.env` 全項目の詳細リファレンス（例: `docs/env_reference.md`）は後続で作成する。`STATIC -> DYNAMIC` 切替時の既存インスタンス自動整理（save/logs同期後に stop/terminate）も Step 5 本実装で扱う。`SERVICE_UNIT_NAME` については、標準の Factorio 専用EC2 ではリスク低めだが、他プロセス同居サーバーでは誤ユニット停止リスクがある旨をリファレンスへ明記する。
+    ・メモ（後対応）: `.env` 全項目の詳細リファレンス（例: `docs/env_reference.md`）は後続で作成する。`STATIC -> DYNAMIC` 切替時の既存インスタンス自動整理（save/logs同期後に stop/terminate）も Step 5 本実装で扱う。`SERVICE_UNIT_NAME` については、標準の Factorio 専用EC2 ではリスク低めだが、他プロセス同居サーバーでは誤ユニット停止リスクがある旨をリファレンスへ明記する。Spot中断通知時の挙動は **ID:068（ID:006 関連）** で後続実装する。DYNAMIC 起動成功時に EventBridge の EC2 state-change ルールを対象 `instance-id` へ上書き追従する実装を追加済み。
 
 [x] ID:007 [FIX] [LOGIC] deploy_policies.py の環境読込優先度を修正
     ・関連箇所: scripts/deploy_policies.py
@@ -365,6 +365,131 @@
     ・背景: test_mode の `already running` 早期返却では `suppressed_logs` が空の回があり、実際の起動失敗（mount check）でも `State Mismatch` としか見えないため。
     ・実測メモ: 2026-04-21 に test_runner 直接の CloudWatch StartQuery 判定で `AccessDeniedException` が発生したため、Executor 側に `integration_detect_startup_failure` を追加して `logs:FilterLogEvents` で判定する方式へ変更。`deploy_policies.py dev` と `deploy_lambda.py dev` 反映後の `python scripts/test_runner.py dev --tests 4 --silent --yes` で `Executor Start (Mount Check)` へ再分類できることを確認。
     ・完了条件: Test4 で `State Mismatch` 判定時に CloudWatch Logs（Executor）を直近参照し、`Startup storage check failed` / `Startup aborted due to storage path check failure` が見つかれば `Executor Start (Mount Check)` に再分類できること。
+
+[ ] ID:068 [TASK] [RISK] Spotインスタンス停止通知（AWS）受信時の保護動作を実装（ID:006関連）
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Executor/executor_eventbridge.py, aws/Lambda/Factorio_Worker/lambda_function.py, scripts/register.py, aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioWorkPolicy/policy.json.example, docs/roadmap.md
+    ・背景: ID:006 のハイブリッド運用で Spot を利用する場合、AWS 側の中断通知（rebalance recommendation / interruption notice）を受けた際に、保存・通知・停止シーケンスが未実装だとデータ損失や運用混乱のリスクがあるため。
+    ・進捗メモ: EventBridge の `EC2 Spot Instance Interruption Warning` / `EC2 Instance Rebalance Recommendation` を Executor で受信し、ログ通知と DynamoDB `SpotInterruptionNotice` マーカー保存を実装。Spot interruption warning 受信時は、RCON で「1分後停止」を通知し、1分待機後に Executor `/stop` を非同期起動、Discord へ「停止実施 + 再開は /start」案内を通知するところまで実装済み。
+    ・完了条件: Spot中断関連イベントを受信した際に、(1) 状態を識別して運用ログへ通知し、(2) 可能な範囲で save/logs 退避と安全停止フローを実行し、(3) 失敗時も再実行可能な状態管理（ActiveInstanceId など）を維持できること。必要IAM権限差分と検証手順が文書化されていること。
+
+[x] ID:069 [FIX] [OPS] deploy_all.py の register 実行順を前倒しして再同期の二度手間を削減
+    ・関連箇所: scripts/deploy_all.py, docs/TASKS.md
+    ・背景: `.env` の運用キー更新時に、`deploy_all.py` 実行前に手動で `register.py` を先行実行する運用が発生していたため、パイプライン内で先に設定再同期を行えるよう順序を調整する必要があったため。
+    ・完了条件: `deploy_all.py <env>` の標準実行で `register` が早い段で実行され、手動先行 `register.py` なしでも最新 `.env` 設定を前提に残りステップが進むこと。
+
+[x] ID:070 [FIX] [QUAL] test_runner の status 判定を DYNAMIC オフライン応答へ追従
+    ・関連箇所: scripts/test_runner.py, docs/TASKS.md
+    ・背景: DYNAMIC かつ ActiveInstanceId 未設定の状態では Executor status が「サーバーが起動していない」応答を返す仕様だが、test_runner が「稼働中/停止中」固定判定のため false negative で失敗していたため。
+    ・完了条件: Test3/12 の status 判定で DYNAMIC オフライン応答を許容し、実運用仕様に沿った合否判定になること。
+
+[x] ID:071 [FIX] [OPS] test_runner 本番実行の二重確認を単一確認へ簡素化
+    ・関連箇所: scripts/test_runner.py, docs/TASKS.md
+    ・背景: 本番テスト実行時の確認プロンプトが二重になっており、運用上は1回確認で十分なため、操作負荷を下げる必要があったため。
+    ・完了条件: `test_runner.py` 実行時の確認が1回のみで完了し、`--yes`/`AUTO_CONFIRM` の既存挙動は維持されること。
+
+[x] ID:072 [FIX] [SEC] DYNAMIC 起動に必要な ExecutePolicy 権限（RunInstances/PassRole）を追加
+    ・関連箇所: aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioExecutePolicy/policy.json, docs/TASKS.md
+    ・背景: prod の DYNAMIC `/start` 実行時に Executor ロールが `ec2:RunInstances` / `iam:PassRole` を満たさず `UnauthorizedOperation` で失敗していたため。
+    ・完了条件: FactorioExecutePolicy に DYNAMIC 起動に必要な権限が反映され、`test_runner.py --tests 4` で PassRole 起因の失敗が解消されること。
+
+[x] ID:073 [FIX] [SEC] ExecutePolicy の CreateTags 条件を緩和して DYNAMIC 起動を安定化
+    ・関連箇所: aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioExecutePolicy/policy.json, docs/TASKS.md
+    ・背景: `ec2:CreateTags` に `ec2:CreateAction=RunInstances` 条件を付けた状態で prod DYNAMIC `/start` が `UnauthorizedOperation` となり、RunInstances 実行時タグ付与が通らなかったため。
+    ・完了条件: CreateTags が prod DYNAMIC 起動時に拒否されず、`test_runner.py prod --tests 4 --yes` で `ec2:CreateTags` エラーが再発しないこと。
+
+[x] ID:074 [FIX] [SEC] ExecutePolicy に DYNAMIC 再利用インスタンスの Start/Stop 権限を追加
+    ・関連箇所: aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioExecutePolicy/policy.json, docs/TASKS.md
+    ・背景: DYNAMIC/PERSISTENT 運用で作成済み ActiveInstanceId を再起動する際、`AllowEC2InstanceControl` が固定 `<INSTANCE_ID>` 前提のため `ec2:StartInstances` が拒否されたため。
+    ・完了条件: DYNAMIC で作成・停止したインスタンスに対し `/start` が `UnauthorizedOperation` にならず再起動できること。
+
+[x] ID:075 [FIX] [QUAL] test_runner の EC2 状態参照を DYNAMIC の ActiveInstanceId 対応に修正
+    ・関連箇所: scripts/test_runner.py, docs/TASKS.md
+    ・背景: test_runner が `INSTANCE_ID` 固定参照で pre-check/cleanup/wait を行っており、DYNAMIC 運用時に `MissingParameter InstanceId` や待機ハングが発生したため。
+    ・完了条件: DYNAMIC 時は DynamoDB `ActiveInstanceId` を優先して EC2 状態参照・待機でき、`--tests 4` 実行で固定ID前提の失敗が出ないこと。
+
+[x] ID:076 [FIX] [SEC] ExecutePolicy の SSM SendCommand 対象を DYNAMIC インスタンスにも拡張
+    ・関連箇所: aws/IAM/FactorioExecutePolicy/policy.json.example, aws/IAM/FactorioExecutePolicy/policy.json, docs/TASKS.md
+    ・背景: DYNAMIC 起動インスタンスに対する `/stop` で `ssm:SendCommand` が固定 `INSTANCE_ID` 制約により AccessDenied となり、停止シーケンスが失敗したため。
+    ・完了条件: DYNAMIC で作成された ActiveInstanceId に対しても `/stop` の SSM 実行が拒否されないこと。
+
+[x] ID:077 [FIX] [QUAL] test_runner Test6 の停止待機で対象IDを事前確保する
+    ・関連箇所: scripts/test_runner.py, docs/TASKS.md
+    ・背景: DYNAMIC 停止テストで `/stop` 実行後に ActiveInstanceId が解決できず、`EC2 Stop Wait` が `instance_id is required` で失敗するケースがあったため。
+    ・完了条件: Test6 で `/stop` 前に対象IDを確保し、停止待機が安定して実行できること。
+
+[x] ID:078 [FIX] [QUAL] test_runner Test4 を EC2 起動成功と通知成功の2段階判定へ分離
+    ・関連箇所: scripts/test_runner.py, docs/TASKS.md
+    ・背景: DYNAMIC `/start` で EC2 起動自体は成功しても、起動後チェック失敗（例: Startup storage check failed）で通知が失敗するケースがあり、現行 Test4 の単一判定では失敗点を正確に切り分けにくいため。
+    ・完了条件: Test4 で「EC2 が running 到達したか」と「起動通知（embed/content）を返せたか」を別結果として記録し、どちらが失敗したかサマリーで即判別できること。
+
+[x] ID:079 [FIX] [QUAL] test_runner の Lambda invoke 待機にタイムアウトを導入してハングを防止
+    ・関連箇所: scripts/test_runner.py, docs/TASKS.md
+    ・背景: prod Test4 実行時に `/start` 呼び出しが同期応答待ちのまま停止し、実行結果が返らず手動中断が必要になるため。
+    ・完了条件: invoke 待機が一定時間でタイムアウトとして返り、テストが無限待ちせず失敗原因をログに残して終了できること。
+
+[x] ID:080 [FIX] [QUAL] Executor `/start` の起動前ストレージ確認に待機予算を導入して長時間ブロックを防止
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Executor/executor_infrastructure.py, docs/TASKS.md
+    ・背景: Test4 で `/start` 実行時、SSM のストレージ確認（1回45秒）と再試行が重なり同期応答が 90 秒を超過し、通知判定前に test_runner 側タイムアウトへ到達するため。
+    ・完了条件: `/start` が起動前ストレージ確認で長時間ブロックしないよう待機予算内で打ち切り、失敗時は理由を返して test_runner が通知失敗として確定判定できること。
+
+[x] ID:081 [FIX] [QUAL] Executor `/start` の待機予算をループ内で厳密適用して 90 秒超過を防止
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, docs/TASKS.md
+    ・背景: ID:080 適用後も、ストレージ確認の1試行実行中に予算超過が発生すると test_runner の 90 秒タイムアウトより先に応答を返せず、Notification 判定がタイムアウト依存になるため。
+    ・完了条件: `/start` のループ内で残り時間を毎回計算し、SSM確認タイムアウトと sleep を残予算に合わせて短縮・打ち切りして、test_mode 実行で 90 秒以内に必ず終端応答を返すこと。
+
+[ ] ID:082 [FIX] [OPS] Executor 起動時に `/etc/fstab` の S3 Files FS ID を `S3_FILES_SYSTEM_ID` へ自己修復
+    ・関連箇所: aws/Lambda/Factorio_Executor/executor_infrastructure.py, aws/Lambda/Factorio_Executor/lambda_function.py, docs/TASKS.md
+    ・背景: DYNAMIC で起動したインスタンスの `/etc/fstab` が旧 FS ID を保持していると `mount -a` が失敗し、`/start` 通知前のストレージ確認で停止して Test4 Notification が継続失敗するため。
+    ・完了条件: `S3_FILES_SYSTEM_ID` が設定されている場合、`/start` のストレージ確認前に `/etc/fstab` の `/mnt/factorio-data` エントリが当該 FS ID へ補正され、`mountpoint` 確認が通ること。
+
+[ ] ID:083 [FIX] [OPS] Executor 起動時に `server-settings.json` 未配置を自動補完して Start 通知失敗を防止
+    ・関連箇所: aws/Lambda/Factorio_Executor/executor_infrastructure.py, docs/TASKS.md
+    ・背景: `/mnt/factorio-data/config/server-settings.json` が存在しないとストレージ確認が失敗し、EC2 起動後でも Notification 判定が継続失敗するため。
+    ・完了条件: `/start` のストレージ確認時に `server-settings.json` が欠落していればローカル既存テンプレートから補完し、最終的に対象ファイル存在チェックが通ること。
+
+[x] ID:084 [TASK] [OPS] 共通AMI運用向けに LT user-data で `/etc/fstab` を環境値から再生成する手順をドキュメント化
+    ・関連箇所: docs/ec2_setup_reference.md, docs/TASKS.md
+    ・背景: 共通AMIを dev/prod で使い回す場合、AMI 取り込み時の `/etc/fstab` が旧 FS ID を保持すると `/start` のストレージ確認が失敗しやすいため、Launch Template の user-data で起動時に環境別値へ再生成する手順を明示する必要があるため。
+    ・完了条件: ec2_setup_reference の DYNAMIC 手順に、`S3_FILES_SYSTEM_ID` / `SERVER_SETTINGS_FILE_NAME` を使って `fstab` を起動時に再生成する user-data 例と、LT 作成・更新コマンドへの組み込み例が記載されていること。
+
+[x] ID:085 [FEAT] [QUAL] test_runner に起動モード横断（STATIC/DYNAMIC + PERSISTENT/EPHEMERAL）検証テストを追加
+    ・関連箇所: scripts/test_runner.py, docs/TASKS.md
+    ・背景: 現行 Test4 はその時点の `SERVER_RUN_MODE` 設定のみを検証するため、モード切替時の回帰（STATIC / DYNAMIC-PERSISTENT / DYNAMIC-EPHEMERAL）を一括で検知しにくいため。
+    ・完了条件: `--tests` 指定で実行可能な専用テストを追加し、`STATIC -> DYNAMIC/PERSISTENT -> (作成インスタンス終了) -> DYNAMIC/EPHEMERAL` の順で検証できること。STATIC は `INSTANCE_ID` 未設定時はスキップ、設定済みで失敗した場合はエラーとして記録されること。
+
+[x] ID:086 [TASK] [QUAL] Executor `/start` のフェーズ別所要時間ログを追加して起動遅延要因を計測可能にする
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, docs/TASKS.md
+    ・背景: EPHEMERAL 維持方針の中で起動時間最適化（RCON待機、AMI最適化、インスタンスタイプ見直し）を適切に進めるには、`/start` のどのフェーズで時間を消費しているかを定量的に把握する必要があるため。
+    ・完了条件: `/start` 実行時に、少なくとも「インスタンス起動待機」「ストレージ確認」「RCON ready待機」「起動全体」の秒数が CloudWatch Logs で確認できること。
+
+[x] ID:087 [FIX] [LOGIC] DYNAMIC `/start` で RCON 未 ready 時に起動完了通知が欠落する問題を解消
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Executor/executor_infrastructure.py, aws/IAM/FactorioExecutePolicy/policy.json.example, aws/Lambda/factorio_common_layer/python/factorio_common/utils.py, scripts/register.py, .env.example, docs/TASKS.md
+    ・背景: 2026-08-07 prod で `/start` を実行したところ EC2（`factorio-prod-dynamic`）は running になったが、CloudWatch 上は SSM 初期 `InvalidInstanceId` の後に RCON ready へ到達せず、約146秒で応答終了。起動完了embed 未送信、`StartStartTime` 残留、RCON ポート拒否（Factorio 未 LISTEN）を確認。加えて DYNAMIC 時の `events:PutRule` が Executor ロールで AccessDenied。既知の UI 課題（ready 未達時に `start.success` が返る）と待ち上限（`RCON_READY_CHECK_MAX_ATTEMPTS=12` × 10s）が重なり、ユーザーからは「起動完了連絡なし」に見える。
+    ・完了条件: DYNAMIC 起動後にストレージ確認成功後は `SERVICE_UNIT_NAME` を明示起動し、RCON ready 到達で起動完了embedを返せること。ready 未達時は `start.success` ではなくタイムアウト/失敗メッセージを返すこと。待ち時間は Lambda timeout と整合し、EventBridge ルール追従に必要な `events:*` 権限が ExecutePolicy にあること。
+    ・実装メモ: ストレージ確認後に `start_factorio_service`、予算駆動ループ＋Lambda残り時間クランプ、`start.timeout` メッセージ、ExecutePolicy に events/PutRule・PutTargets・DescribeRule と lambda:GetPolicy/AddPermission・EventBridge 向け PassRole を追加。デプロイ後は `deploy_policies` / `deploy_lambda` / layer更新 / `register` が必要。
+
+[x] ID:088 [FIX] [OPS] Factorio headless バージョン不一致（クライアント新・サーバー旧）を是正できる運用を整備
+    ・関連箇所: aws/Lambda/Factorio_Executor/executor_infrastructure.py, aws/Lambda/Factorio_Executor/lambda_function.py, aws/Lambda/Factorio_Executor/integration_handlers.py, scripts/register.py, .env.example, docs/ec2_setup_reference.md, docs/TASKS.md
+    ・背景: 2026-08-07 クライアント 2.0.77 に対しサーバー headless が 2.0.76 のまま起動し、接続時にバージョン不一致ダイアログが出たため。DYNAMIC の AMI 固定バイナリが古くなると同種事象が再発する。
+    ・完了条件: 稼働中インスタンスを SSM 経由で目標バージョン（既定 stable）へ更新でき、`/start` 時に `FACTORIO_VERSION` 不一致なら headless を自動更新してからサービス起動できること。
+    ・実装メモ: `upgrade_factorio_headless` + `integration_upgrade_factorio`、prod 稼働インスタンスを 2.0.77 へ更新済み（binary verify OK）。`FACTORIO_VERSION=2.0.77` を `.env`/SSM に設定。
+
+[x] ID:089 [FIX] [OPS] save.zip が root 所有で Factorio が永続セーブできない問題を修正
+    ・関連箇所: aws/Lambda/Factorio_Executor/executor_infrastructure.py, aws/Lambda/Factorio_Executor/integration_handlers.py, aws/Lambda/Factorio_Executor/lambda_function.py, docs/TASKS.md
+    ・背景: 2026-08-07 prod で `/mnt/factorio-data/saves/save.zip` が root:root 644 のままだったため factorio ユーザーが更新できず、オートセーブがローカル `/opt/factorio/saves` にのみ書かれ、再起動・再入場で状況が巻き戻る事象が発生した。
+    ・完了条件: 起動時ストレージ確認で saves/config/mods を factorio 書き込み可に補正し、運用中も権限修復でき、save.zip が更新されること。
+
+[x] ID:090 [FIX] [LOGIC] DYNAMIC EPHEMERAL の `/stop` 後にログチャンネルへ停止完了が届かない問題を修正
+    ・関連箇所: aws/Lambda/Factorio_Executor/executor_eventbridge.py, aws/Lambda/Factorio_Executor/lambda_function.py, scripts/update_eventbridge.py, docs/TASKS.md
+    ・背景: prod は INSTANCE_LIFECYCLE_MODE=EPHEMERAL で terminate するが、EventBridge ルールとハンドラが `stopped`/`running` のみを対象にしている。加えて terminate 前に ActiveInstanceId を消すと、`terminated` イベントの ID 照合にも失敗しログ通知されない。
+    ・完了条件: EPHEMERAL 終了時もログチャンネルへ停止完了通知が届き、EventBridge パターンに `terminated` を含め、停止対象 ID をイベント消費まで保持できること。
+    ・実装メモ: `terminated` を EventBridge パターンとハンドラに追加。`StopTargetInstanceId` で terminate 後も照合可能にし、完了イベントで Active を掃除。prod へ Executor v91 + EventBridge ルール更新済み。
+
+[x] ID:091 [FIX] [LOGIC] EC2不要コマンド（status/pass/license）を offline でも実行可能にする
+    ・関連箇所: aws/Lambda/Factorio_Executor/lambda_function.py, scripts/test_runner.py, docs/TASKS.md
+    ・背景: DYNAMIC では `ActiveInstanceId` 未設定時にインスタンス解決が全 action で失敗し、本来 EC2 不要の `/license` `/status` `/pass` も offline 文言で止まるため。
+    ・完了条件: `start`/`stop`/`save` のみインスタンス必須とし、`license` は常時、`status`/`pass` はインスタンス無しでも停止表示・セッションPW/未設定応答を返すこと。
+    ・実装メモ: `_OFFLINE_OK_ACTIONS` で resolve 失敗を error にしない。license は describe 前に分岐。status は stopped テンプレ、pass は ActivePassword/not_set。
 
 ## ステップ横断の考慮事項（開発・着手前チェック）
 

@@ -37,9 +37,12 @@ GLOBAL_TEXT_RESOURCES = {
         }
     },
     "start": {
-        # // TASK [UI]: 起動待機がタイムアウトした際にこのメッセージが返され、ユーザーが起動完了と誤認してしまうため、「起動に時間がかかっています。後で /status を確認してください」等の具体的な案内に変更する
         "success": {"ja": "🚀 サーバーの起動を開始しました。", "en": "🚀 Starting server..."},
         "already": {"ja": "⚠️ サーバーは既に起動しているか、準備中です。", "en": "⚠️ Server is already running or pending."},
+        "timeout": {
+            "ja": "⏳ サーバー起動の準備待機がタイムアウトしました。EC2 は起動していても Factorio が応答していない可能性があります。`/status` で確認し、必要なら管理者にログ確認を依頼してください。",
+            "en": "⏳ Startup readiness wait timed out. EC2 may be up but Factorio may not be responsive yet. Check `/status`, and ask an admin to review logs if needed."
+        },
         "completed": {
             "ja": "### 📍 接続先: `{ip}:{port}`\n### 🔑 パスワード: `{pwd}`",
             "en": "### 📍 Address: `{ip}:{port}`\n### 🔑 Password: `{pwd}`"

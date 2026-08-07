@@ -137,6 +137,20 @@ Discordのスラッシュコマンドを使用してサーバーを管理しま�
 4. **[ローカル]** `.env` / `.env.dev` の `SERVICE_UNIT_NAME` を対象環境の systemd ユニット名へ設定する（例: `factorio`, `factorio-dev`, `factorio-prod`）。
    - 本プロジェクトの標準構成（Factorio専用EC2）ではリスクは低いが、独自構築サーバーで他プロセス/他ユニットを同居させる場合は、誤ったユニット名を指定すると意図しないサービス停止リスクがあるため、適用前に `systemctl status <SERVICE_UNIT_NAME>` で対象を確認すること。
 
+#### 実行モード関連の環境変数（ID:006）
+
+- `SERVER_RUN_MODE`
+  - `STATIC`: 固定 `INSTANCE_ID` を `start/stop` する既存運用
+  - `DYNAMIC`: 起動テンプレート/AMI からインスタンスを都度作成する運用
+- `INSTANCE_LIFECYCLE_MODE`（`DYNAMIC` 時に有効）
+  - `PERSISTENT`: 停止（`stop`）
+  - `EPHEMERAL`: 終了（`terminate`）
+- `DYNAMIC_CAPACITY_MODE`（`DYNAMIC` 時に有効）
+  - `ONDEMAND`: オンデマンドインスタンス
+  - `SPOT`: スポットインスタンス
+- `BASE_AMI_ID` / `LAUNCH_TEMPLATE_*` / `SUBNET_ID` / `SECURITY_GROUP_IDS` などは、`DYNAMIC` 実装時の起動入力として利用します。
+  - 補足: `create-image` 1回で作成される AMI は1つです。環境差分を `.env.<env>` と AWS リソース設定で吸収する運用であれば、同じ AMI を本番/開発の両方で共用できます。
+
 ### 2. AWS：インフラリソースの構築
 1. **[ローカル]** `python scripts/init_aws_resources.py <env>` を実行し、S3, DynamoDB, IAM Role, EventBridge, Lambda の器を自動作成する。
    - `S3_FILES_SYSTEM_ID` が未設定の場合、S3 Files 用 IAM ロール（`S3_FILES_SERVICE_ROLE_NAME`、既定 `FactorioS3FilesServiceRole`）を用意したうえで、AWS CLI (`s3files create-file-system`) によりファイルシステム作成を試行します。初回は `setup_config.py` と `deploy_policies.py` で Regist ポリシー更新後に再実行してください。

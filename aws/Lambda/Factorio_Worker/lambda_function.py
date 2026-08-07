@@ -21,6 +21,25 @@ def init_config():
     factorio_state_table = get_client('dynamodb', True).Table(config.get('dynamodb_table_name'))
     config["initialized"] = True
 
+
+def _worker_get_server_run_mode():
+    return (config.get('server_run_mode') or 'STATIC').strip().upper() or 'STATIC'
+
+
+def _worker_resolve_ec2_instance_id():
+    """STATIC は固定 INSTANCE_ID。DYNAMIC は DynamoDB の ActiveInstanceId を優先する。"""
+    if _worker_get_server_run_mode() != 'DYNAMIC':
+        return (config.get('instance_id') or '').strip().strip("'\"")
+    try:
+        res = factorio_state_table.get_item(Key={'ConfigKey': 'ActiveInstanceId'})
+        iid = (res.get('Item') or {}).get('Value')
+        if iid:
+            return str(iid).strip().strip("'\"")
+    except Exception as e:
+        print(f"⚠️ Worker: Failed to read ActiveInstanceId: {e}")
+    return ''
+
+
 def notify(content, mode='followup', event=None, embeds=None, components=None):
     # テストモード時は Discord への通知処理をスキップ
     if config.get("test_mode"):
@@ -155,7 +174,11 @@ def handle_restore(event):
 
     elif sub_cmd == 'select':
         ec2 = get_client('ec2')
-        state = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]['State']['Name']
+        target_id = _worker_resolve_ec2_instance_id()
+        if not target_id:
+            state = 'stopped'
+        else:
+            state = ec2.describe_instances(InstanceIds=[target_id])['Reservations'][0]['Instances'][0]['State']['Name']
         if state == 'running': return get_msg("restore", "stop_required", locale), None
         
         vid = next((o['value'] for o in sub_options if o['name'] == 'version_id'), None)
@@ -205,8 +228,13 @@ def handle_auto_check(event):
     locale = event.get('locale', 'ja')
     
     ec2 = get_client('ec2')
-    # TODO ID:006: DYNAMIC対応時は監視対象InstanceIdを固定値ではなくセッションの稼働中インスタンスIDから解決する
-    inst = ec2.describe_instances(InstanceIds=[config['instance_id']])['Reservations'][0]['Instances'][0]
+    target_id = _worker_resolve_ec2_instance_id()
+    if not target_id:
+        if _worker_get_server_run_mode() == 'DYNAMIC':
+            return {"action": "none", "reason": "No active dynamic instance"}
+        return {"action": "none", "reason": "Missing INSTANCE_ID configuration"}
+
+    inst = ec2.describe_instances(InstanceIds=[target_id])['Reservations'][0]['Instances'][0]
     state_name = inst['State']['Name']
     if state_name != 'running' and not test_mode: return
 
@@ -278,7 +306,7 @@ def handle_auto_check(event):
 
             if test_mode: return {"action": "restart_triggered", "reason": "RCON unresponsive"}
             notify(get_msg("worker_specific", "rcon_unresponsive", locale), mode='log') # ログチャットにアラート送信
-            get_client('ssm').send_command(InstanceIds=[config['instance_id']], DocumentName="AWS-RunShellScript", Parameters={'commands': ["sudo systemctl restart factorio"]})
+            get_client('ssm').send_command(InstanceIds=[target_id], DocumentName="AWS-RunShellScript", Parameters={'commands': ["sudo systemctl restart factorio"]})
             factorio_state_table.update_item(Key={'ConfigKey': 'AutoRestartCount'}, UpdateExpression="set CountValue = :v", ExpressionAttributeValues={':v': restart_count})
             off_count = 0
         if test_mode: return {"action": "count_offline", "current": off_count}

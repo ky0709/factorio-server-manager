@@ -172,7 +172,7 @@ def update_eventbridge_resources():
             "detail-type": ["EC2 Instance State-change Notification"],
             "detail": {
                 "instance-id": [instance_id],
-                "state": sorted(["running", "stopped"])
+                "state": sorted(["running", "stopped", "terminated"])
             }
         }
         expected_target_arn = f"arn:aws:lambda:{region}:{account_id}:function:{executor_lambda_name}"
@@ -274,7 +274,7 @@ def update_eventbridge_resources():
                 "detail-type": ["EC2 Instance State-change Notification"],
                 "detail": {
                     "instance-id": [instance_id],
-                    "state": sorted(["running", "stopped"])
+                    "state": sorted(["running", "stopped", "terminated"])
                 }
             }),
             State='ENABLED'

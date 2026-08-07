@@ -152,6 +152,9 @@ mkdir -p saves config mods logs
 EOF
 ```
 
+バージョンを固定したい場合は URL の `stable` を具体バージョンに置き換えます（例: `https://factorio.com/get-download/2.0.77/headless/linux64`）。
+クライアントとサーバーのバージョン不一致時は、稼働中インスタンス向けに Executor の `integration_upgrade_factorio`（test_mode）で headless を更新できます。`.env` の `FACTORIO_VERSION`（例: `2.0.77`）を設定して `register.py` すると、以降の `/start` で差分更新されます。
+
 ### 5-2. server-settings.json 作成
 
 ```bash
@@ -591,22 +594,163 @@ aws ec2 wait instance-stopped --instance-ids <INSTANCE_ID>
 
 RCON は Lambda 実装側（Notifier / Worker）から実行し、CloudWatch Logs でレスポンスを確認してください。
 
-## 9. （任意）AMI化・起動テンプレート化の事前準備
+## 9. AMI 化と起動テンプレート作成（ID:006 / DYNAMIC 運用準備）
+
+本節は、ここまでの手順で構築した **1つの EC2 インスタンス環境**をベースに AMI を作成し、DYNAMIC 起動へ移行するための手順です。  
+本番のみを運用する場合はこのまま進めてください。開発/本番を分離する場合は、同じ手順で `-prod` / `-dev` サフィックスを付けたリソース（AMI 名、Launch Template 名、ロール名、ポリシー名など）をそれぞれ作成する運用を推奨します。  
+**公開ドキュメントには実値を残さない**ため、以下はすべてプレースホルダーで記載しています。
+
+### 9-1. 事前準備（現在値の確認）
 
 ```bash
-# AMI化しやすいように起動時タグを付与（未設定なら）
-aws ec2 create-tags --resources <INSTANCE_ID> --tags Key=Role,Value=<SERVER_ROLE_TAG> Key=ManagedBy,Value=<MANAGED_BY_TAG>
+# 対象インスタンスのネットワーク・起動設定を取得（テンプレート作成で再利用）
+aws ec2 describe-instances \
+  --instance-ids <INSTANCE_ID> \
+  --region <REGION> \
+  --profile <PROFILE> \
+  --query "Reservations[0].Instances[0].{SubnetId:SubnetId,SecurityGroups:SecurityGroups[].GroupId,InstanceType:InstanceType,KeyName:KeyName,IamProfile:IamInstanceProfile.Arn}" \
+  --output table
+```
 
-# 停止状態でAMI作成（起動中なら先に停止）
-aws ec2 stop-instances --instance-ids <INSTANCE_ID>
-aws ec2 wait instance-stopped --instance-ids <INSTANCE_ID>
-aws ec2 create-image --instance-id <INSTANCE_ID> --name <BASE_AMI_NAME> --no-reboot
+### 9-2. AMI 作成（停止ベース）
 
-# 起動テンプレート作成（ハイブリッド運用のDYNAMICモードで利用）
+```bash
+# 1) 停止（稼働中なら）
+aws ec2 stop-instances --instance-ids <INSTANCE_ID> --region <REGION> --profile <PROFILE>
+aws ec2 wait instance-stopped --instance-ids <INSTANCE_ID> --region <REGION> --profile <PROFILE>
+
+# 2) AMI 作成
+aws ec2 create-image \
+  --instance-id <INSTANCE_ID> \
+  --name <BASE_AMI_NAME> \
+  --description "Base AMI for Factorio dynamic run mode" \
+  --no-reboot \
+  --region <REGION> \
+  --profile <PROFILE> \
+  --query "ImageId" \
+  --output text
+```
+
+AMI の状態確認:
+
+```bash
+aws ec2 describe-images \
+  --image-ids <AMI_ID> \
+  --owners self \
+  --region <REGION> \
+  --profile <PROFILE> \
+  --query "Images[0].{State:State,Name:Name,CreationDate:CreationDate}" \
+  --output table
+```
+
+### 9-3. 起動テンプレート作成（初回）
+
+共通 AMI を dev/prod で使い回す場合は、Launch Template の `UserData` で `/etc/fstab` を毎回再生成して環境差分を吸収する運用を推奨します。
+
+`lt-userdata.sh`（例）:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+S3_FILES_SYSTEM_ID="<S3_FILES_SYSTEM_ID>"
+SERVER_SETTINGS_FILE_NAME="<SERVER_SETTINGS_FILE_NAME>"
+
+mkdir -p /mnt/factorio-data /mnt/factorio-data/saves /mnt/factorio-data/mods /mnt/factorio-data/config
+
+tmp_fstab="$(mktemp)"
+awk '$2 != "/mnt/factorio-data" {print}' /etc/fstab > "$tmp_fstab"
+echo "${S3_FILES_SYSTEM_ID}:/  /mnt/factorio-data  s3files  _netdev,rw  0  0" >> "$tmp_fstab"
+cp /etc/fstab /etc/fstab.bak.factorio 2>/dev/null || true
+mv "$tmp_fstab" /etc/fstab
+
+mountpoint -q /mnt/factorio-data || mount -a
+
+if [ ! -f "/mnt/factorio-data/config/${SERVER_SETTINGS_FILE_NAME}" ]; then
+  if [ -f "/opt/factorio/config/${SERVER_SETTINGS_FILE_NAME}" ]; then
+    cp "/opt/factorio/config/${SERVER_SETTINGS_FILE_NAME}" "/mnt/factorio-data/config/${SERVER_SETTINGS_FILE_NAME}"
+  elif [ -f "/opt/factorio/config/server-settings.json" ]; then
+    cp /opt/factorio/config/server-settings.json "/mnt/factorio-data/config/${SERVER_SETTINGS_FILE_NAME}"
+  elif [ -f "/opt/factorio/data/server-settings.example.json" ]; then
+    cp /opt/factorio/data/server-settings.example.json "/mnt/factorio-data/config/${SERVER_SETTINGS_FILE_NAME}"
+  fi
+fi
+
+chown -R factorio:factorio /mnt/factorio-data || true
+```
+
+`UserData` は Base64 で埋め込んだ `launch-template-data` JSON を使います（PowerShell 例）:
+
+```powershell
+$userdata = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content -Raw .\lt-userdata.sh)))
+$ltData = @{
+  ImageId = "<AMI_ID>"
+  InstanceType = "<INSTANCE_TYPE>"
+  KeyName = "<KEY_NAME>"
+  SecurityGroupIds = @("<SG_ID_1>", "<SG_ID_2>")
+  SubnetId = "<SUBNET_ID>"
+  IamInstanceProfile = @{ Name = "<INSTANCE_PROFILE_NAME>" }
+  UserData = $userdata
+} | ConvertTo-Json -Depth 6 -Compress
+$ltData | Set-Content -Encoding ascii .\lt-data.json
+```
+
+```bash
 aws ec2 create-launch-template \
   --launch-template-name <LAUNCH_TEMPLATE_NAME> \
-  --launch-template-data '{"ImageId":"<AMI_ID>","InstanceType":"t3.medium","KeyName":"<KEY_NAME>","SecurityGroupIds":["<SG_ID>"],"SubnetId":"<SUBNET_ID>","IamInstanceProfile":{"Name":"<INSTANCE_PROFILE_NAME>"}}'
+  --version-description "base-v1" \
+  --launch-template-data file://lt-data.json \
+  --region <REGION> \
+  --profile <PROFILE> \
+  --query "LaunchTemplate.{Id:LaunchTemplateId,Name:LaunchTemplateName}" \
+  --output table
 ```
+
+既存テンプレートを更新する場合（新バージョン追加）:
+
+```bash
+aws ec2 create-launch-template-version \
+  --launch-template-id <LAUNCH_TEMPLATE_ID> \
+  --source-version '$Latest' \
+  --version-description "base-v2" \
+  --launch-template-data file://lt-data.json \
+  --region <REGION> \
+  --profile <PROFILE> \
+  --query "LaunchTemplateVersion.{Version:VersionNumber,TemplateId:LaunchTemplateId}" \
+  --output table
+```
+
+### 9-4. `.env.<env>` 反映項目（DYNAMIC）
+
+`ID:006` 実装では以下を参照します。
+
+```dotenv
+SERVER_RUN_MODE='DYNAMIC'
+INSTANCE_LIFECYCLE_MODE='PERSISTENT'   # または EPHEMERAL
+DYNAMIC_CAPACITY_MODE='ONDEMAND'       # または SPOT
+BASE_AMI_ID='<AMI_ID>'
+LAUNCH_TEMPLATE_ID='<LAUNCH_TEMPLATE_ID>'
+LAUNCH_TEMPLATE_VERSION='$Latest'
+SUBNET_ID='<SUBNET_ID>'
+SECURITY_GROUP_IDS='<SG_ID_1>,<SG_ID_2>'
+INSTANCE_TYPE='<INSTANCE_TYPE>'
+KEY_NAME='<KEY_NAME>'
+EC2_INSTANCE_PROFILE_NAME='<INSTANCE_PROFILE_NAME>'
+```
+
+> 変更後は `python scripts/register.py <env>` を実行し、SSM へ同期してください。
+
+### 9-5. 動作確認（DYNAMIC）
+
+1. `deploy_lambda.py <env>` で Executor / Worker を反映  
+2. `/start` 実行後に DynamoDB の `ActiveInstanceId` が作成されることを確認  
+3. EventBridge の EC2 state-change ルールが `instance-id=<ActiveInstanceId>` に更新されることを確認
+
+補足（AMI の扱い）:
+
+- 1回の `create-image` で作成されるのは **1つの AMI** です（自動で「本番用」と「開発用」の2つが同時作成されるわけではありません）。
+- 同じ AMI を本番/開発で共用する運用は可能です。
+- 環境ごとに差分（パッケージ構成、タグ、ミドルウェア設定など）を分けたい場合は、環境ごとに AMI を作成してください。
 
 ## 10. 付録: 技術的な解説と選定理由
 

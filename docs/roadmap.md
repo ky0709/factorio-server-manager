@@ -48,6 +48,7 @@ Amazon S3 Files の導入と、4層構造（Interactor/Executor/Worker/Notifier�
 
 [ ] Factorio_Executor を同一 Lambda 内でモジュール分割し、STATIC 運用の回帰を確認（ID:039）。
 [ ] STATIC/DYNAMIC ハイブリッド、Spot/On-Demand 選択、停止時の terminate フロー、アクティブ InstanceId の保持と Spot 退避方針を実装（ID:006）。
+[ ] Spotインスタンス中断通知（AWS）受信時の保護挙動（save/log退避、通知、状態整合）を実装（ID:068）。
 [ ] 稼働検証後、Executor の Lambda 物理分割の要否と移行案を整理（ID:040）。
 
 🧩 Step 6: Discord リモート管理機能の本実装
